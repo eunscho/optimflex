@@ -64,6 +64,11 @@
 #'
 #' @return A list containing optimization results and iteration metadata.
 #' @export
+#' @examples
+# Simple quadratic function optimization
+#' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+#' res <- double_dogleg(start = c(0, 0), objective = quad)
+#' print(res$par)
 double_dogleg <- function(
     start, 
     objective, 
@@ -144,7 +149,12 @@ double_dogleg <- function(
   x_old <- x; f_old <- NA_real_; delta <- ctrl$initial_delta
   
   # Initialize Hessian approximation
-  B <- diag(ctrl$H_init_diag, n)
+  use_exact_hess <- !is.null(hessian)
+  B <- if (use_exact_hess) {
+    tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
+  } else {
+    diag(ctrl$H_init_diag, n)
+  }
   H_eval <- NULL; g_inf <- NA_real_
   pred_dec <- NA_real_; pred_dec_avg <- NA_real_
   
@@ -269,10 +279,13 @@ double_dogleg <- function(
               if (is.finite(sy) && sy > 1e-12) update_ok <- TRUE
             }
             
-            if (update_ok) {
-              Bs <- as.numeric(B %*% s); sBs <- sum(s * Bs)
-              B <- B - (Bs %*% t(Bs)) / (sBs + 1e-16) + (y %*% t(y)) / (sy + 1e-16)
-              B <- 0.5 * (B + t(B))
+            if (use_exact_hess) {
+              B <- tryCatch(hess_func(x), error = function(e) B)
+            } else {
+              if (update_ok) {
+                B <- B - (Bs %*% t(Bs)) / (sBs + 1e-16) + (y %*% t(y)) / (sy + 1e-16)
+                B <- 0.5 * (B + t(B))
+              }
             }
           }
           
@@ -282,6 +295,17 @@ double_dogleg <- function(
           }
           
           x_old <- x; f_old <- f; x <- x_try; f <- f_try; g <- g_new
+
+          # Post-step convergence check (handles exact solutions, e.g., quadratics)
+          g_inf_new <- max(abs(g_new), na.rm = TRUE)
+          if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
+            g_inf <- g_inf_new
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
+            } else { converged <- TRUE; status <- "converged"; break }
+          }
+
           if (rho > ctrl$rho_expand) delta <- min(ctrl$delta_max, ctrl$delta_expand * delta)
         } else {
           # Step Rejected: Shrink Trust Region

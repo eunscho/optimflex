@@ -1,7 +1,7 @@
 Package: optimflex
 Type: Package
 Title: Derivative-Based Optimization with User-Defined Convergence Criteria
-Version: 0.1.1
+Version: 0.1.7
 Authors@R: 
     person("Eunseong", "Cho", 
            email = "bene@kw.ac.kr", 

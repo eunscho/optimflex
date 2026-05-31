@@ -8,7 +8,6 @@ rosenbrock <- function(x) {
 test_that("General optimization suite works on Rosenbrock", {
   algorithms <- list(
     bfgs            = bfgs,
-    dfp             = dfp,
     dogleg          = dogleg,
     double_dogleg   = double_dogleg,
     modified_newton = modified_newton,

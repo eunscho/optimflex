@@ -57,6 +57,11 @@
 #'
 #' @return A list containing optimization results and iteration metadata.
 #' @export
+#' @examples
+# Simple quadratic function optimization
+#' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+#' res <- modified_newton(start = c(0, 0), objective = quad)
+#' print(res$par)
 modified_newton <- function(
     start,
     objective,
@@ -199,6 +204,17 @@ modified_newton <- function(
         if (!ls_ok) { status <- "line_search_failed"; break }
         
         g <- grad_func(x)
+
+        # Post-line-search convergence check (handles exact solutions, e.g., quadratics)
+        g_inf_new <- max(abs(g), na.rm = TRUE)
+        if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
+          g_inf <- g_inf_new
+          if (isTRUE(ctrl$use_posdef)) {
+            H_last <- tryCatch(hess_func(x), error = function(e) NULL)
+            is_pd <- is_pd_fast(H_last)
+            if (is_pd) { converged <- TRUE; status <- "converged"; break }
+          } else { converged <- TRUE; status <- "converged"; break }
+        }
       }
     }, error = function(e) { status <<- paste0("runtime_error: ", conditionMessage(e)) })
   }

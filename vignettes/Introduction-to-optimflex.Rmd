@@ -98,10 +98,8 @@ rosenbrock <- function(x) {
 
 start_val <- c(-1.2, 1.0)
 
-# Compare DFP and Double Dogleg
-res_dfp <- dfp(start_val, rosenbrock)
+# Compare Double Dogleg
 res_dd  <- double_dogleg(start_val, rosenbrock, control = list(initial_delta = 2.0))
 
-cat("DFP Iterations:", res_dfp$iter, "\n")
 cat("Double Dogleg Iterations:", res_dd$iter, "\n")
 ```

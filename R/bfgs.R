@@ -57,6 +57,12 @@
 #'
 #' @return A list containing optimization results and iteration metadata.
 #' @export
+#' 
+#' @examples
+# Simple quadratic function optimization
+#' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+#' res <- bfgs(start = c(0, 0), objective = quad)
+#' print(res$par)
 bfgs <- function(
     start,
     objective,
@@ -208,6 +214,16 @@ bfgs <- function(
         # 5.4) Update Parameters
         alpha_final <- ls$alpha; x_new <- ls$x; f_new <- ls$f; g_new <- ls$g
         s <- x_new - x; y <- g_new - g; sy <- sum(s * y)
+
+        # 5.4a) Post-line-search convergence check (handles exact solutions, e.g., quadratics)
+        g_inf_new <- max(abs(g_new), na.rm = TRUE)
+        if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
+          x <- x_new; f <- f_new; g <- g_new; g_inf <- g_inf_new
+          if (isTRUE(ctrl$use_posdef)) {
+            H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+            if (is_pd_fast(H_eval)) { status <- "converged"; converged <- TRUE; break }
+          } else { status <- "converged"; converged <- TRUE; break }
+        }
         update_ok <- FALSE; y_star <- y; sy_star <- sy
         B_s_approx <- -alpha_final * g; sBs <- as.numeric(sum(s * B_s_approx))
         

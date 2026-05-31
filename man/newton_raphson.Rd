@@ -71,6 +71,11 @@ All return values are explicitly cast to scalars (e.g., \code{as.numeric},
 \code{as.logical}) to ensure stability when the function is called within 
 large-scale simulation loops or packaged into data frames.
 }
+\examples{
+quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+res <- newton_raphson(start = c(0, 0), objective = quad)
+print(res$par)
+}
 \references{
 \itemize{
    \item Nocedal, J., & Wright, S. J. (2006). \emph{Numerical Optimization}. Springer.

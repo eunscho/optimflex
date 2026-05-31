@@ -68,6 +68,11 @@ solution reduces the risk of declaring convergence at non-minimizing stationary
 points, such as saddle points.
 }
 
+\examples{
+quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+res <- l_bfgs_b(start = c(0, 0), objective = quad)
+print(res$par)
+}
 \references{
 Byrd, R. H., Lu, P., Nocedal, J., & Zhu, C. (1995). A limited memory algorithm 
 for bound constrained optimization. \emph{SIAM Journal on Scientific Computing}, 

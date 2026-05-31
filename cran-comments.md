@@ -1,12 +1,15 @@
+## Resubmission
+This is a resubmission for 'optimflex' version 0.1.7.
+The package was previously submitted as version 0.1.6.
+
+## Changes since 0.1.6
+* Fixed bugs in `dogleg()` and `double_dogleg()` so that when the user 
+  supplies an exact Hessian, it is used directly in the optimization 
+  rather than being overridden by the BFGS approximation.
+
 ## Test results
-Checked on win-builder (devel and release).
-Results: 0 errors | 0 warnings | 0 notes (on local and win-builder after version increment)
-
-## Resubmission comments
-This is a resubmission for `optimflex`. 
-* The version has been incremented to 0.1.1 to resolve the "Insufficient package version" warning.
-* I have fixed the Rd macro errors (specifically the non-standard LaTeX symbols in `dfp.R`) that were identified in the previous submission.
-* All examples, tests, and vignettes now pass without errors.
-
-## Note on NOTES
-* 'New submission': This is expected as it is the first release of the package.
+* R CMD check --as-cran: 0 errors | 0 warnings | 1 note
+* Note: "unable to verify current time" — a local network issue, not a 
+  package problem.
+* Win-builder (R-release): OK
+* Local Windows 11 (x86_64): OK

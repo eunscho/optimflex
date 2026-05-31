@@ -80,6 +80,11 @@ The function includes a "Ridge Rescue" mechanism. If the approximate Hessian
 is singular or poorly conditioned for Cholesky decomposition, it iteratively 
 adds a diagonal ridge \eqn{(\tau I)} until numerical stability is achieved.
 }
+\examples{
+quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+res <- gauss_newton(start = c(0, 0), objective = quad)
+print(res$par)
+}
 \references{
 \itemize{
    \item Nocedal, J., & Wright, S. J. (2006). \emph{Numerical Optimization}. Springer.

@@ -75,6 +75,11 @@ While the \code{double_dogleg} algorithm (Dennis and Mei, 1979) introduces a bia
 point to follow the Newton direction more closely, this standard Dogleg follows 
 the original two-segment trajectory.
 }
+\examples{
+quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+res <- dogleg(start = c(0, 0), objective = quad)
+print(res$par)
+}
 \references{
 \itemize{
    \item Powell, M. J. D. (1970). A Hybrid Method for Nonlinear Equations. 

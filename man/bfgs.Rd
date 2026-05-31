@@ -75,6 +75,11 @@ strategy is applied to the update vectors to preserve the positive
 definiteness of the Hessian approximation even when the curvature condition 
 is not naturally met.
 }
+\examples{
+quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+res <- bfgs(start = c(0, 0), objective = quad)
+print(res$par)
+}
 \references{
 \itemize{
    \item Nocedal, J., & Wright, S. J. (2006). \emph{Numerical Optimization}. Springer.

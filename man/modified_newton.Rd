@@ -81,3 +81,8 @@ the gradient and Hessian:
    \item \code{richardson}: Richardson extrapolation via the \code{numDeriv} package.
 }
 }
+\examples{
+quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
+res <- modified_newton(start = c(0, 0), objective = quad)
+print(res$par)
+}
