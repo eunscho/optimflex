@@ -137,7 +137,7 @@ double_dogleg <- function(
   } else {
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
-  
+  hess_func_pd <- function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   # ---------- 3. Initialization ----------
   x <- pmax(lower, pmin(as.numeric(start), upper))
   n <- length(x)
@@ -233,7 +233,7 @@ double_dogleg <- function(
         
         if (res_conv && it > 1) {
           if (isTRUE(ctrl$use_posdef)) {
-            H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+            H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
             if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv <- FALSE
           } else { converged <- TRUE; status <- "converged"; break }
         }
@@ -301,7 +301,7 @@ double_dogleg <- function(
           if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
             g_inf <- g_inf_new
             if (isTRUE(ctrl$use_posdef)) {
-              H_eval <- tryCatch(hess_func(x_try), error = function(e) NULL)
+              H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
               if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
             } else { converged <- TRUE; status <- "converged"; break }
           }
@@ -317,7 +317,7 @@ double_dogleg <- function(
   }
   
   # ---------- 5. Final Status & Output Construction ----------
-  if (is.null(H_eval)) H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+  if (is.null(H_eval)) H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
   
   final_clock <- proc.time() - start_clock
   list(

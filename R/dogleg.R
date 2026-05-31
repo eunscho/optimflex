@@ -121,6 +121,8 @@ dogleg <- function(
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
+  hess_func_pd <- function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
+  
   project <- function(z, l, u) pmax(l, pmin(z, u))
   
   # ---------- 3. Initialization ----------
@@ -164,14 +166,14 @@ dogleg <- function(
           B_f <- B[free_idx, free_idx, drop = FALSE]
           
           # 4.2) Subproblem: Newton Point and Cauchy Point
-          pN_f <- tryCatch(
-            solve(B_f, -g_f), 
-            error = function(e) {
-              ev <- eigen(B_f, symmetric = TRUE, only.values = TRUE)$values
-              shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
-              solve(B_f + diag(shift, nfree), -g_f)
-            }
-          )
+          pN_f <- tryCatch({
+            invisible(chol(B_f))
+            solve(B_f, -g_f)
+          }, error = function(e) {
+            ev <- eigen(B_f, symmetric = TRUE, only.values = TRUE)$values
+            shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
+            solve(B_f + diag(shift, nfree), -g_f)
+          })
           
           gnorm <- sqrt(sum(g_f^2)); Bg <- as.numeric(B_f %*% g_f); gBg <- sum(g_f * Bg)
           alpha_c <- if (gBg > 1e-15) (gnorm^2) / gBg else delta / max(gnorm, 1e-12)
@@ -201,7 +203,7 @@ dogleg <- function(
         
         if (res_conv && it > 1L) {
           if (isTRUE(ctrl$use_posdef)) {
-            H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+            H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
             if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv <- FALSE
           } else { converged <- TRUE; status <- "converged"; break }
         }
@@ -236,17 +238,17 @@ dogleg <- function(
           }
           
           x_old <- x; f_old <- f; x <- x_try; f <- f_try; g <- g_new
-
+          
           # Post-step convergence check (handles exact solutions, e.g., quadratics)
           g_inf_new <- max(abs(g_new), na.rm = TRUE)
           if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
             g_inf <- g_inf_new
             if (isTRUE(ctrl$use_posdef)) {
-              H_eval <- tryCatch(hess_func(x_try), error = function(e) NULL)
+              H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
               if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
             } else { converged <- TRUE; status <- "converged"; break }
           }
-
+          
           if (rho > ctrl$rho_expand) delta <- min(ctrl$delta_max, ctrl$delta_expand * delta)
         } else {
           delta <- ctrl$delta_shrink * delta
@@ -269,6 +271,7 @@ dogleg <- function(
     cpu_time         = as.numeric(final_clock[1] + final_clock[2]), 
     elapsed_time     = as.numeric(final_clock[3]), 
     max_grad         = as.numeric(g_inf), 
-    Hessian          = H_eval
+    Hessian          = H_eval,
+    approx_hessian   = B      
   )
 }
