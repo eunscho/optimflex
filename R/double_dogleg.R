@@ -301,7 +301,7 @@ double_dogleg <- function(
           if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
             g_inf <- g_inf_new
             if (isTRUE(ctrl$use_posdef)) {
-              H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+              H_eval <- tryCatch(hess_func(x_try), error = function(e) NULL)
               if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
             } else { converged <- TRUE; status <- "converged"; break }
           }
