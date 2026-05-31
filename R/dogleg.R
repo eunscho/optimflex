@@ -227,7 +227,7 @@ dogleg <- function(
           } else { if (sy > 1e-12) update_ok <- TRUE }
           
           if (use_exact_hess) {
-            B <- tryCatch(hess_func(x), error = function(e) B)
+            B <- tryCatch(hess_func(x_try), error = function(e) B)
           } else {
             if (update_ok) {
               B <- B - (Bs %*% t(Bs)) / (sBs + 1e-16) + (y %*% t(y)) / (sy + 1e-16)
