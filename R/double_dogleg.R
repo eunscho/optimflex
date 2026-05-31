@@ -151,7 +151,13 @@ double_dogleg <- function(
   # Initialize Hessian approximation
   use_exact_hess <- !is.null(hessian)
   B <- if (use_exact_hess) {
-    tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
+    B_init <- tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
+    B_init <- 0.5 * (B_init + t(B_init))
+    if (!is_pd_fast(B_init)) {
+      ev <- eigen(B_init, symmetric = TRUE, only.values = TRUE)$values
+      shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
+      B_init + diag(shift, n)
+    } else B_init
   } else {
     diag(ctrl$H_init_diag, n)
   }
@@ -280,7 +286,15 @@ double_dogleg <- function(
             }
             
             if (use_exact_hess) {
-              B <- tryCatch(hess_func(x_try), error = function(e) B)
+              B_new <- tryCatch(hess_func(x_try), error = function(e) B)
+              B_new <- 0.5 * (B_new + t(B_new))
+              if (!is_pd_fast(B_new)) {
+                ev <- eigen(B_new, symmetric = TRUE, only.values = TRUE)$values
+                shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
+                B <- B_new + diag(shift, n)
+              } else {
+                B <- B_new
+              }
             } else {
               if (update_ok) {
                 B <- B - (Bs %*% t(Bs)) / (sBs + 1e-16) + (y %*% t(y)) / (sy + 1e-16)
