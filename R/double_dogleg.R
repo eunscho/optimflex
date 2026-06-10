@@ -286,6 +286,17 @@ double_dogleg <- function(
           if (update_exact) {
             B <- tryCatch(hess_func(x_try), error = function(e) B)
             B <- 0.5 * (B + t(B))
+            # Safeguard B to be positive definite before it is used in the next
+            # double-dogleg subproblem. Without this, an indefinite exact Hessian
+            # (common far from the solution) produces g'Bg < 0, which flips the
+            # Cauchy point into an ascent direction and stalls the trust region.
+            # Mirrors the safeguard applied to the initial B and to the exact
+            # branch of the BFGS path below.
+            if (!is_pd_fast(B)) {
+              ev <- eigen(B, symmetric = TRUE, only.values = TRUE)$values
+              shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
+              B <- B + diag(shift, n)
+            }
           } else {
             Bs <- as.numeric(B %*% s); sBs <- sum(s * Bs); sy <- sum(s * y)
             
