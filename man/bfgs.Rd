@@ -76,6 +76,7 @@ definiteness of the Hessian approximation even when the curvature condition
 is not naturally met.
 }
 \examples{
+# Simple quadratic function optimization
 quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 res <- bfgs(start = c(0, 0), objective = quad)
 print(res$par)

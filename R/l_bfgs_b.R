@@ -43,18 +43,21 @@
 #'   \item \code{use_rel_x}: Logical. Criterion: \eqn{\max |(x_{new} - x_{old}) / x_{old}| <} \code{tol_rel_x}.
 #'   \item \code{use_grad}: Logical. Criterion: \eqn{\|g\|_\infty <} \code{tol_grad}.
 #'   \item \code{use_posdef}: Logical. Criterion: Positive definiteness of the Hessian.
+#'   \item \code{use_pred_f}: Logical. Criterion: predicted decrease \eqn{<} \code{tol_pred_f}.
+#'   \item \code{use_pred_f_avg}: Logical. Criterion: predicted decrease per parameter \eqn{<} \code{tol_pred_f_avg}.
 #'   \item \code{max_iter}: Maximum number of iterations (default: 10000).
 #'   \item \code{m}: Number of L-BFGS memory updates (default: 5).
 #'   \item \code{tol_abs_f}, \code{tol_rel_f}: Tolerances for function value change.
 #'   \item \code{tol_abs_x}, \code{tol_rel_x}: Tolerances for parameter change.
 #'   \item \code{tol_grad}: Tolerance for the projected gradient (default: 1e-4).
+#'   \item \code{tol_pred_f}, \code{tol_pred_f_avg}: Tolerances for the predicted decrease.
 #' }
 #' @param ... Additional arguments passed to objective, gradient, and Hessian functions.
 #'
 #' @return A list containing optimization results and metadata.
 #' @export
 #' @examples
-# Simple quadratic function optimization
+#' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 #' res <- l_bfgs_b(start = c(0, 0), objective = quad)
 #' print(res$par)
@@ -162,6 +165,7 @@ l_bfgs_b <- function(
   s_list <- list(); y_list <- list(); rho_list <- list()
   it <- 0L; converged <- FALSE; status <- "running"
   x_old <- x; f_old <- NA_real_; s_last <- NULL; g_inf <- NA_real_
+  pred_dec <- NA_real_; pred_dec_avg <- NA_real_; H_eval <- NULL
   
   # ---------- 4. Main Loop ----------
   tryCatch({
@@ -173,18 +177,27 @@ l_bfgs_b <- function(
       g_inf <- max(abs(pg))
       
       # 4.1) Convergence Verification (AND Rule)
-      res_conv <- TRUE
-      if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
-      if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
-      if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
-      if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
-      if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+      # Gradient / parameter / function-value tests use the current point (before the
+      # line search), matching gauss_newton(). The predicted-decrease tests
+      # (use_pred_f / use_pred_f_avg) need the step that the line search selects, so they
+      # are evaluated after the line search (see 4.5b) and AND-combined with res_conv_pre.
+      res_conv_pre <- TRUE
+      if (ctrl$use_grad) res_conv_pre <- res_conv_pre && (g_inf <= ctrl$tol_grad)
+      if (ctrl$use_abs_f && !is.na(f_old)) res_conv_pre <- res_conv_pre && (abs(f - f_old) <= ctrl$tol_abs_f)
+      if (ctrl$use_rel_f && !is.na(f_old)) res_conv_pre <- res_conv_pre && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+      if (ctrl$use_abs_x && it > 1L) res_conv_pre <- res_conv_pre && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+      if (ctrl$use_rel_x && it > 1L) res_conv_pre <- res_conv_pre && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
       
-      if (res_conv && it > 1L) {
-        if (isTRUE(ctrl$use_posdef)) {
-          H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
-          if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv <- FALSE
-        } else { converged <- TRUE; status <- "converged"; break }
+      # When neither predicted-decrease test is active, the convergence decision is
+      # complete here, so finalize immediately (this also skips an unnecessary line
+      # search when already converged).
+      if (!isTRUE(ctrl$use_pred_f) && !isTRUE(ctrl$use_pred_f_avg)) {
+        if (res_conv_pre && it > 1L) {
+          if (isTRUE(ctrl$use_posdef)) {
+            H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+            if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv_pre <- FALSE
+          } else { converged <- TRUE; status <- "converged"; break }
+        }
       }
       
       # 4.2) Update theta scaling for B0
@@ -236,6 +249,30 @@ l_bfgs_b <- function(
       # Implicit B*s approximation using theta
       Bs_approx <- theta * s_vec; sBs <- sum(s_vec * Bs_approx)
       
+      # 4.5b) Predicted decrease of the line-search step on the objective scale, using the
+      # L-BFGS initial Hessian model B0 = theta*I (the same model the Powell damping below
+      # uses). s_vec is the actual projected step, so this reflects the step taken. The same
+      # value is reported as pred_dec / pred_dec_avg, and is AND-combined with the
+      # gradient/parameter/function-value result from 4.1 (res_conv_pre).
+      pred_dec <- as.numeric(-(sum(g * s_vec) + 0.5 * sBs)); pred_dec_avg <- pred_dec / n
+      if (isTRUE(ctrl$use_pred_f) || isTRUE(ctrl$use_pred_f_avg)) {
+        res_conv <- res_conv_pre
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+        if (res_conv && it > 1L) {
+          if (isTRUE(ctrl$use_posdef)) {
+            H_eval <- tryCatch(hess_func(x_new), error = function(e) NULL)
+            if (is_pd_fast(H_eval)) {
+              x_old <- x; f_old <- f; x <- x_new; f <- f_new; g <- g_new
+              converged <- TRUE; status <- "converged"; break
+            }
+          } else {
+            x_old <- x; f_old <- f; x <- x_new; f <- f_new; g <- g_new
+            converged <- TRUE; status <- "converged"; break
+          }
+        }
+      }
+      
       update_ok <- FALSE; y_star <- y_vec; sy_star <- sy
       if (isTRUE(ctrl$use_damped)) {
         if (sy < ctrl$damp_phi * sBs) {
@@ -262,6 +299,14 @@ l_bfgs_b <- function(
   }, error = function(e) { status <<- paste0("runtime_error: ", conditionMessage(e)) })
   
   # ---------- 5. Final Status & Output Construction ----------
+  # Report the derivative-based Hessian and its positive-definiteness, consistent with the
+  # other optimizers. Reuse H_eval computed during the convergence check when available;
+  # otherwise evaluate it once here. (L-BFGS keeps no explicit Hessian approximation, so
+  # there is no approx_hessian to report, unlike the dense-B optimizers.)
+  if (is.null(H_eval)) H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+  Hess_pd <- if (!is.null(H_eval)) is_pd_fast(H_eval) else FALSE
+  H_final <- if (!is.null(H_eval)) H_eval else NA_real_
+
   final_clock <- proc.time() - start_clock
   list(
     par          = x, 
@@ -271,6 +316,10 @@ l_bfgs_b <- function(
     iter         = it, 
     cpu_time     = as.numeric(final_clock[1] + final_clock[2])[1], 
     elapsed_time = as.numeric(final_clock[3])[1],
-    max_grad     = as.numeric(g_inf)[1]
+    max_grad     = as.numeric(g_inf)[1],
+    Hess_is_pd   = Hess_pd,
+    Hessian      = H_final,
+    pred_dec     = pred_dec,
+    pred_dec_avg = pred_dec_avg
   )
 }

@@ -38,8 +38,6 @@
 #' @param objective Function. The objective function to minimize.
 #' @param gradient Function (optional). Gradient of the objective function.
 #' @param hessian Function (optional). Hessian matrix of the objective function.
-#' @param lower Numeric vector. Lower bounds for box constraints.
-#' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags:
 #'    \itemize{
 #'      \item \code{use_abs_f}: Logical. Use absolute change in objective for convergence.
@@ -58,7 +56,7 @@
 #' @return A list containing optimization results and iteration metadata.
 #' @export
 #' @examples
-# Simple quadratic function optimization
+#' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 #' res <- modified_newton(start = c(0, 0), objective = quad)
 #' print(res$par)
@@ -67,8 +65,6 @@ modified_newton <- function(
     objective,
     gradient       = NULL,
     hessian        = NULL,
-    lower          = -Inf,
-    upper          = Inf,
     control        = list(),
     ...
 ) {
@@ -136,6 +132,7 @@ modified_newton <- function(
   f <- tryCatch(eval_obj(x), error = function(e) NA_real_)
   it <- 0L; x_old <- x; f_old <- f; converged <- FALSE; status <- "running"
   H_last <- NULL; is_pd <- FALSE; g_inf <- NA_real_
+  pred_dec <- NA_real_; pred_dec_avg <- NA_real_
   
   if (!is.finite(f)) { 
     status <- "objective_error_at_start" 
@@ -152,10 +149,13 @@ modified_newton <- function(
         H <- hess_func(x); H <- 0.5 * (H + t(H)); H_last <- H
         
         # 4.2) Step Calculation with Dynamic Ridge Adjustment
+        # H_used records the matrix actually factorized to solve for the step (H itself
+        # when positive definite, otherwise the ridge-adjusted H_mod). It is used for the
+        # predicted-decrease quadratic model below, consistent with gauss_newton().
         R <- try(chol(H), silent = TRUE)
         if (!inherits(R, "try-error")) {
           is_pd <- TRUE
-          step <- backsolve(R, forwardsolve(t(R), -g))
+          step <- backsolve(R, forwardsolve(t(R), -g)); H_used <- H
         } else {
           is_pd <- FALSE
           tau <- ctrl$ridge_offset
@@ -163,7 +163,7 @@ modified_newton <- function(
             H_mod <- H + diag(tau, n)
             R <- try(chol(H_mod), silent = TRUE)
             if (!inherits(R, "try-error")) {
-              step <- backsolve(R, forwardsolve(t(R), -g))
+              step <- backsolve(R, forwardsolve(t(R), -g)); H_used <- H_mod
               break
             }
             tau <- tau * 10
@@ -173,6 +173,13 @@ modified_newton <- function(
         
         if (status == "ridge_failed") break
         gTp <- sum(g * step) 
+        
+        # 4.2b) Predicted Decrease of the Newton step (objective-scale quadratic model
+        # -(g'p + 0.5 p'H p), using the matrix actually factorized, H_used). The step is
+        # known before the line search, so all criteria are tested together in 4.3.
+        if (isTRUE(ctrl$use_pred_f) || isTRUE(ctrl$use_pred_f_avg)) {
+          pred_dec <- as.numeric(-(gTp + 0.5 * sum(step * (H_used %*% step)))); pred_dec_avg <- pred_dec / n
+        }
         
         # 4.3) Convergence Verification (Accessing flags via ctrl$)
         res_conv <- TRUE
@@ -185,6 +192,8 @@ modified_newton <- function(
         if (ctrl$use_rel_x && it > 1L) {
           res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old))) <= ctrl$tol_rel_x)
         }
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
         
         if (res_conv) {
           if (isTRUE(ctrl$use_posdef)) {
@@ -204,7 +213,7 @@ modified_newton <- function(
         if (!ls_ok) { status <- "line_search_failed"; break }
         
         g <- grad_func(x)
-
+        
         # Post-line-search convergence check (handles exact solutions, e.g., quadratics)
         g_inf_new <- max(abs(g), na.rm = TRUE)
         if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
@@ -225,6 +234,7 @@ modified_newton <- function(
     par = x, objective = f, converged = converged, status = status, iter = it,
     cpu_time = as.numeric(final_clock[1] + final_clock[2]), 
     elapsed_time = as.numeric(final_clock[3]),
-    max_grad = as.numeric(g_inf), Hess_is_pd = is_pd, Hessian = H_last
+    max_grad = as.numeric(g_inf), Hess_is_pd = is_pd, Hessian = H_last,
+    pred_dec = pred_dec, pred_dec_avg = pred_dec_avg
   )
 }

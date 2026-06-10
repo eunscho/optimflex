@@ -65,7 +65,7 @@
 #' @return A list containing optimization results and iteration metadata.
 #' @export
 #' @examples
-# Simple quadratic function optimization
+#' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 #' res <- double_dogleg(start = c(0, 0), objective = quad)
 #' print(res$par)
@@ -114,6 +114,7 @@ double_dogleg <- function(
   )
   ctrl <- utils::modifyList(ctrl0, control)
   ctrl$diff_method <- match.arg(ctrl$diff_method, c("forward", "central", "richardson"))
+  ctrl$hessian_update <- match.arg(ctrl$hessian_update, c("bfgs", "exact"))
   
   if (ctrl$diff_method == "richardson") {
     if (!requireNamespace("numDeriv", quietly = TRUE)) stop("Package 'numDeriv' required.")
@@ -137,7 +138,17 @@ double_dogleg <- function(
   } else {
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
-  hess_func_pd <- function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
+  # FIX (4): mirror hess_func so the positive-definiteness check uses the supplied analytic
+  # Hessian when available (and the same numerical method otherwise), instead of always
+  # recomputing a forward-difference Hessian via fast_hess(). This also makes the final
+  # H_eval (used for Hess_is_pd and Hessian in the output) honor the analytic Hessian.
+  hess_func_pd <- if (!is.null(hessian)) {
+    function(z) hessian(z, ...)
+  } else if (ctrl$diff_method == "richardson") {
+    function(z) numDeriv::hessian(objective, z, method = "Richardson", ...)
+  } else {
+    function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
+  }
   # ---------- 3. Initialization ----------
   x <- pmax(lower, pmin(as.numeric(start), upper))
   n <- length(x)
@@ -149,7 +160,14 @@ double_dogleg <- function(
   x_old <- x; f_old <- NA_real_; delta <- ctrl$initial_delta
   
   # Initialize Hessian approximation
+  # use_exact_hess: an analytic Hessian was supplied (used for the initial B and the
+  #   positive-definiteness check regardless of the update mode).
+  # update_exact: recompute the exact Hessian at every accepted step. Only when an
+  #   analytic Hessian is supplied AND hessian_update == "exact". Otherwise (the default
+  #   "bfgs"), B is refined with damped BFGS rank-two updates even if an analytic Hessian
+  #   was supplied, with that Hessian still used as the starting B.
   use_exact_hess <- !is.null(hessian)
+  update_exact <- use_exact_hess && identical(ctrl$hessian_update, "exact")
   B <- if (use_exact_hess) {
     B_init <- tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
     B_init <- 0.5 * (B_init + t(B_init))
@@ -163,6 +181,7 @@ double_dogleg <- function(
   }
   H_eval <- NULL; g_inf <- NA_real_
   pred_dec <- NA_real_; pred_dec_avg <- NA_real_
+  scaled_B <- FALSE   # FIX (2): tracks whether the one-time self-scaling of B has been applied
   
   # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
@@ -230,12 +249,20 @@ double_dogleg <- function(
         }
         
         # 4.3) Convergence Verification
+        # All convergence criteria are combined with an AND rule, matching gauss_newton().
+        # The predicted-decrease tests reuse current_pred_dec from 4.2 (the quadratic-model
+        # predicted decrease of the double-dogleg step on the free subspace); the same value
+        # is reported as pred_dec / pred_dec_avg.
+        pred_dec <- current_pred_dec
+        pred_dec_avg <- current_pred_dec / n
         res_conv <- TRUE
         if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
         if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
         if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
         if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
         if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
         
         if (res_conv && it > 1) {
           if (isTRUE(ctrl$use_posdef)) {
@@ -256,16 +283,21 @@ double_dogleg <- function(
           g_new <- grad_func(x_try); s <- x_try - x; y <- g_new - g
           
           # Hessian Matrix Update
-          if (ctrl$hessian_update == "full") {
+          if (update_exact) {
             B <- tryCatch(hess_func(x_try), error = function(e) B)
             B <- 0.5 * (B + t(B))
           } else {
             Bs <- as.numeric(B %*% s); sBs <- sum(s * Bs); sy <- sum(s * y)
             
             # Initial Scaling
-            if (it == 1L && is.finite(sy) && sy > 1e-12) {
+            # FIX (2): trigger the one-time self-scaling on the first BFGS update via a flag
+            # (scaled_B) rather than it == 1L, so it still fires when the first iteration's
+            # step was rejected (in which case the first actual update happens at it > 1).
+            # Skipped when an analytic Hessian seeded B, so the accurate initial curvature
+            # scale is preserved (consistent with dogleg()).
+            if (!use_exact_hess && !scaled_B && is.finite(sy) && sy > 1e-12) {
               y_norm_sq <- sum(y * y)
-              if (y_norm_sq > 1e-12) B <- B * (y_norm_sq / sy)
+              if (y_norm_sq > 1e-12) { B <- B * (y_norm_sq / sy); scaled_B <- TRUE }
               Bs <- as.numeric(B %*% s); sBs <- sum(s * Bs) 
             }
             
@@ -303,13 +335,8 @@ double_dogleg <- function(
             }
           }
           
-          # Record Predictive Values
-          if (isTRUE(ctrl$use_pred_f) || isTRUE(ctrl$use_pred_f_avg)) {
-            pred_dec <- current_pred_dec; pred_dec_avg <- pred_dec / n
-          }
-          
           x_old <- x; f_old <- f; x <- x_try; f <- f_try; g <- g_new
-
+          
           # Post-step convergence check (handles exact solutions, e.g., quadratics)
           g_inf_new <- max(abs(g_new), na.rm = TRUE)
           if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
@@ -319,7 +346,7 @@ double_dogleg <- function(
               if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
             } else { converged <- TRUE; status <- "converged"; break }
           }
-
+          
           if (rho > ctrl$rho_expand) delta <- min(ctrl$delta_max, ctrl$delta_expand * delta)
         } else {
           # Step Rejected: Shrink Trust Region

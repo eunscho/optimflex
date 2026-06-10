@@ -76,6 +76,7 @@ point to follow the Newton direction more closely, this standard Dogleg follows
 the original two-segment trajectory.
 }
 \examples{
+# Simple quadratic function optimization
 quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 res <- dogleg(start = c(0, 0), objective = quad)
 print(res$par)

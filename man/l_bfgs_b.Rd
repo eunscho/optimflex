@@ -37,11 +37,14 @@ Can be scalars if all parameters share the same bounds.}
   \item \code{use_rel_x}: Logical. Criterion: \eqn{\max |(x_{new} - x_{old}) / x_{old}| <} \code{tol_rel_x}.
   \item \code{use_grad}: Logical. Criterion: \eqn{\|g\|_\infty <} \code{tol_grad}.
   \item \code{use_posdef}: Logical. Criterion: Positive definiteness of the Hessian.
+  \item \code{use_pred_f}: Logical. Criterion: predicted decrease \eqn{<} \code{tol_pred_f}.
+  \item \code{use_pred_f_avg}: Logical. Criterion: predicted decrease per parameter \eqn{<} \code{tol_pred_f_avg}.
   \item \code{max_iter}: Maximum number of iterations (default: 10000).
   \item \code{m}: Number of L-BFGS memory updates (default: 5).
   \item \code{tol_abs_f}, \code{tol_rel_f}: Tolerances for function value change.
   \item \code{tol_abs_x}, \code{tol_rel_x}: Tolerances for parameter change.
   \item \code{tol_grad}: Tolerance for the projected gradient (default: 1e-4).
+  \item \code{tol_pred_f}, \code{tol_pred_f_avg}: Tolerances for the predicted decrease.
 }}
 
 \item{...}{Additional arguments passed to objective, gradient, and Hessian functions.}
@@ -69,6 +72,7 @@ points, such as saddle points.
 }
 
 \examples{
+# Simple quadratic function optimization
 quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 res <- l_bfgs_b(start = c(0, 0), objective = quad)
 print(res$par)

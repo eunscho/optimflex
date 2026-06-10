@@ -59,7 +59,7 @@
 #' @export
 #' 
 #' @examples
-# Simple quadratic function optimization
+#' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 #' res <- bfgs(start = c(0, 0), objective = quad)
 #' print(res$par)
@@ -193,18 +193,27 @@ bfgs <- function(
         }
         
         # 5.2) Convergence Verification
-        res_conv <- TRUE
-        if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
-        if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
-        if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
-        if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
-        if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        # Gradient / parameter / function-value tests use the current point (before the
+        # line search), matching gauss_newton(). The predicted-decrease tests
+        # (use_pred_f / use_pred_f_avg) need the step that the line search selects, so they
+        # are evaluated after the line search (see 5.6b) and AND-combined with res_conv_pre.
+        res_conv_pre <- TRUE
+        if (ctrl$use_grad) res_conv_pre <- res_conv_pre && (g_inf <= ctrl$tol_grad)
+        if (ctrl$use_abs_f && !is.na(f_old)) res_conv_pre <- res_conv_pre && (abs(f - f_old) <= ctrl$tol_abs_f)
+        if (ctrl$use_rel_f && !is.na(f_old)) res_conv_pre <- res_conv_pre && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+        if (ctrl$use_abs_x && it > 1L) res_conv_pre <- res_conv_pre && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+        if (ctrl$use_rel_x && it > 1L) res_conv_pre <- res_conv_pre && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
         
-        if (res_conv && it > 1) {
-          if (isTRUE(ctrl$use_posdef)) {
-            H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
-            if (is_pd_fast(H_eval)) { status <- "converged"; converged <- TRUE; break } else { res_conv <- FALSE }
-          } else { status <- "converged"; converged <- TRUE; break }
+        # When neither predicted-decrease test is active, the convergence decision is
+        # complete here, so finalize immediately (this also skips an unnecessary line
+        # search when already converged).
+        if (!isTRUE(ctrl$use_pred_f) && !isTRUE(ctrl$use_pred_f_avg)) {
+          if (res_conv_pre && it > 1) {
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) { status <- "converged"; converged <- TRUE; break } else { res_conv_pre <- FALSE }
+            } else { status <- "converged"; converged <- TRUE; break }
+          }
         }
         
         # 5.3) Line Search
@@ -214,7 +223,7 @@ bfgs <- function(
         # 5.4) Update Parameters
         alpha_final <- ls$alpha; x_new <- ls$x; f_new <- ls$f; g_new <- ls$g
         s <- x_new - x; y <- g_new - g; sy <- sum(s * y)
-
+        
         # 5.4a) Post-line-search convergence check (handles exact solutions, e.g., quadratics)
         g_inf_new <- max(abs(g_new), na.rm = TRUE)
         if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
@@ -241,6 +250,27 @@ bfgs <- function(
         # 5.6) Predicted Decrease
         if (isTRUE(ctrl$use_pred_f) || isTRUE(ctrl$use_pred_f_avg)) {
           pred_dec <- as.numeric(-(sum(g * s) + 0.5 * sBs)); pred_dec_avg <- pred_dec / n
+        }
+        
+        # 5.6b) Predicted-decrease convergence tests (use the step selected by the line
+        # search, i.e. the same pred_dec that is reported). AND-combined with the
+        # gradient/parameter/function-value result from 5.2 (res_conv_pre).
+        if (isTRUE(ctrl$use_pred_f) || isTRUE(ctrl$use_pred_f_avg)) {
+          res_conv <- res_conv_pre
+          if (isTRUE(ctrl$use_pred_f))     res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+          if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+          if (res_conv && it > 1) {
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func(x_new), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) {
+                x_old <- x; f_old <- f; x <- x_new; f <- f_new; g <- g_new
+                status <- "converged"; converged <- TRUE; break
+              }
+            } else {
+              x_old <- x; f_old <- f; x <- x_new; f <- f_new; g <- g_new
+              status <- "converged"; converged <- TRUE; break
+            }
+          }
         }
         
         # 5.7) Inverse Hessian Update (Sherman-Morrison Formula)

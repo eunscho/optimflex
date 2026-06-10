@@ -35,8 +35,6 @@
 #' @param objective Function. The objective function to minimize.
 #' @param gradient Function (optional). Gradient of the objective function.
 #' @param hessian Function (optional). Hessian matrix of the objective function.
-#' @param lower Numeric vector. Lower bounds for box constraints.
-#' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags:
 #'    \itemize{
 #'      \item \code{use_abs_f}: Logical. Use absolute change in objective for convergence.
@@ -54,7 +52,7 @@
 #' @return A list containing optimization results and iteration metadata.
 #' @export
 #' @examples
-# Simple quadratic function optimization
+#' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 #' res <- newton_raphson(start = c(0, 0), objective = quad)
 #' print(res$par)
@@ -63,8 +61,6 @@ newton_raphson <- function(
     objective,
     gradient       = NULL,
     hessian        = NULL,
-    lower          = -Inf,
-    upper          = Inf,
     control        = list(),
     ...
 ) {
@@ -125,7 +121,7 @@ newton_raphson <- function(
   x <- as.numeric(start); n <- length(x); start_clock <- proc.time()
   f <- tryCatch(eval_obj(x), error = function(e) NA_real_)
   it <- 0L; x_old <- x; f_old <- NA_real_; converged <- FALSE; status <- "running"
-  H_last <- NULL; g_inf <- NA_real_; is_pd <- FALSE; pred_dec <- NA_real_
+  H_last <- NULL; g_inf <- NA_real_; is_pd <- FALSE; pred_dec <- NA_real_; pred_dec_avg <- NA_real_
   
   if (!is.finite(f)) { 
     status <- "objective_error_at_start" 
@@ -153,7 +149,7 @@ newton_raphson <- function(
         
         # 4.3) Predicted Decrease calculation
         if (isTRUE(ctrl$use_pred_f) || isTRUE(ctrl$use_pred_f_avg)) {
-          pred_dec <- as.numeric(-(gTp + 0.5 * sum(step * (H %*% step))))
+          pred_dec <- as.numeric(-(gTp + 0.5 * sum(step * (H %*% step)))); pred_dec_avg <- pred_dec / n
         }
         
         # 4.4) Convergence Verification (Accessing flags via ctrl$)
@@ -168,7 +164,10 @@ newton_raphson <- function(
           res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old))) <= ctrl$tol_rel_x)
         }
         if (isTRUE(ctrl$use_pred_f)) {
-          res_conv <- res_conv && (!is.na(pred_dec) && abs(pred_dec) <= ctrl$tol_pred_f)
+          res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        }
+        if (isTRUE(ctrl$use_pred_f_avg)) {
+          res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
         }
         
         if (res_conv) {
@@ -191,7 +190,7 @@ newton_raphson <- function(
         
         if (!ls_ok) { status <- "line_search_failed"; break }
         g <- grad_func(x)
-
+        
         # Post-line-search convergence check (handles exact solutions, e.g., quadratics)
         g_inf_new <- max(abs(g), na.rm = TRUE)
         if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
@@ -199,6 +198,9 @@ newton_raphson <- function(
           if (isTRUE(ctrl$use_posdef)) {
             H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
             is_pd <- is_pd_fast(H_eval)
+            # Keep the reported Hessian consistent with is_pd: this post-step check
+            # evaluates the Hessian at the updated point, so record it as H_last too.
+            if (!is.null(H_eval)) H_last <- H_eval
             if (is_pd) { converged <- TRUE; status <- "converged"; break }
           } else { converged <- TRUE; status <- "converged"; break }
         }
@@ -220,6 +222,7 @@ newton_raphson <- function(
     max_grad     = as.numeric(g_inf)[1], 
     Hess_is_pd   = as.logical(is_pd)[1], 
     Hessian      = H_last,
-    pred_dec     = as.numeric(pred_dec)[1]
+    pred_dec     = as.numeric(pred_dec)[1],
+    pred_dec_avg = as.numeric(pred_dec_avg)[1]
   )
 }

@@ -40,8 +40,6 @@
 #' @param gradient Function (optional). Gradient of the objective function.
 #' @param hessian Function (optional). Hessian matrix of the objective function.
 #' @param jac Function (optional). Jacobian matrix of the residuals.
-#' @param lower Numeric vector. Lower bounds for box constraints.
-#' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags:
 #'    \itemize{
 #'      \item \code{use_abs_f}: Logical. Use absolute change in objective for convergence.
@@ -59,7 +57,7 @@
 #' @return A list containing optimization results and iteration metadata.
 #' @export
 #' @examples
-# Simple quadratic function optimization
+#' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 #' res <- gauss_newton(start = c(0, 0), objective = quad)
 #' print(res$par)
@@ -70,8 +68,6 @@ gauss_newton <- function(
     gradient       = NULL,
     hessian        = NULL,
     jac            = NULL,
-    lower          = -Inf,
-    upper          = Inf,
     control        = list(),
     ...
 ) {
@@ -241,7 +237,7 @@ gauss_newton <- function(
         # Prepare for next iteration
         J <- jac_func(x)
         g <- get_g(x, J)
-
+        
         # Post-line-search convergence check (handles exact solutions, e.g., quadratics)
         g_inf_new <- max(abs(g), na.rm = TRUE)
         if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {

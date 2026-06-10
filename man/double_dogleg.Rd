@@ -79,6 +79,7 @@ This modification allows the algorithm to perform more like a Newton method
 earlier in the optimization process compared to the standard Dogleg.
 }
 \examples{
+# Simple quadratic function optimization
 quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 res <- double_dogleg(start = c(0, 0), objective = quad)
 print(res$par)

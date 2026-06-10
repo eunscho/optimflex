@@ -59,7 +59,7 @@
 #' @return A list containing optimization results and iteration metadata.
 #' @export
 #' @examples
-# Simple quadratic function optimization
+#' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 #' res <- dogleg(start = c(0, 0), objective = quad)
 #' print(res$par)
@@ -105,6 +105,7 @@ dogleg <- function(
     damp_phi        = 0.2
   )
   ctrl <- utils::modifyList(ctrl0, control)
+  ctrl$hessian_update <- match.arg(ctrl$hessian_update, c("bfgs", "exact"))
   
   # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
@@ -121,7 +122,13 @@ dogleg <- function(
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  hess_func_pd <- function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
+  # FIX (4): when an analytic Hessian is supplied, use it for the positive-definiteness
+  # check as well, instead of always recomputing a forward-difference Hessian via fast_hess().
+  hess_func_pd <- if (!is.null(hessian)) {
+    function(z) hessian(z, ...)
+  } else {
+    function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
+  }
   
   project <- function(z, l, u) pmax(l, pmin(z, u))
   
@@ -137,7 +144,14 @@ dogleg <- function(
   x_old <- x; f_old <- NA_real_; delta <- ctrl$initial_delta
   
   # Initialize Hessian approximation (B)
+  # use_exact_hess: an analytic Hessian was supplied (used for the initial B and the
+  #   positive-definiteness check regardless of the update mode).
+  # update_exact: recompute the exact Hessian at every accepted step. Only when an
+  #   analytic Hessian is supplied AND hessian_update == "exact". Otherwise (the default
+  #   "bfgs"), B is refined with damped BFGS rank-two updates even if an analytic Hessian
+  #   was supplied, with that Hessian still used as the starting B.
   use_exact_hess <- !is.null(hessian)
+  update_exact <- use_exact_hess && identical(ctrl$hessian_update, "exact")
   B <- if (use_exact_hess) {
     B_init <- tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
     B_init <- 0.5 * (B_init + t(B_init))
@@ -151,6 +165,7 @@ dogleg <- function(
   }
   H_eval <- NULL; g_inf <- NA_real_
   pred_dec <- NA_real_; pred_dec_avg <- NA_real_
+  scaled_B <- FALSE   # FIX (2): tracks whether the one-time self-scaling of B has been applied
   
   # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
@@ -172,13 +187,16 @@ dogleg <- function(
           B_f <- B[free_idx, free_idx, drop = FALSE]
           
           # 4.2) Subproblem: Newton Point and Cauchy Point
+          # FIX (1)/(3): factorize B_f only once (Cholesky) and reuse the factor to solve,
+          # instead of computing chol() merely as a test and then re-factorizing inside solve().
           pN_f <- tryCatch({
-            invisible(chol(B_f))
-            solve(B_f, -g_f)
+            R_f <- chol(B_f)
+            backsolve(R_f, forwardsolve(t(R_f), -g_f))
           }, error = function(e) {
             ev <- eigen(B_f, symmetric = TRUE, only.values = TRUE)$values
             shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
-            solve(B_f + diag(shift, nfree), -g_f)
+            R_f <- chol(B_f + diag(shift, nfree))
+            backsolve(R_f, forwardsolve(t(R_f), -g_f))
           })
           
           gnorm <- sqrt(sum(g_f^2)); Bg <- as.numeric(B_f %*% g_f); gBg <- sum(g_f * Bg)
@@ -203,9 +221,20 @@ dogleg <- function(
         }
         
         # 4.4) Convergence Check
+        # The full set of convergence criteria is combined with an AND rule, matching
+        # gauss_newton(). All tests use the current point (before the step is taken);
+        # the predicted-decrease tests reuse current_pred_dec computed in 4.3, which is
+        # the quadratic-model predicted decrease of the dogleg step on the free subspace.
+        pred_dec <- current_pred_dec
+        pred_dec_avg <- current_pred_dec / n
         res_conv <- TRUE
         if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+        if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
+        if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+        if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
         if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
         
         if (res_conv && it > 1L) {
           if (isTRUE(ctrl$use_posdef)) {
@@ -223,6 +252,19 @@ dogleg <- function(
         if (rho > ctrl$rho_accept && actual_red > 0) {
           g_new <- grad_func(x_try); s <- x_try - x; y <- g_new - g
           
+          # FIX (2): self-scale the initial Hessian approximation on the first BFGS update
+          # (Nocedal & Wright 2006, eq. 6.20; direct-Hessian form B0 <- (y'y / s'y) I).
+          # This mirrors the initial scaling already used in bfgs(). It is applied before
+          # the curvature products below, so that both the damping step and the BFGS update
+          # operate on the scaled B. Only relevant for the quasi-Newton path.
+          if (!use_exact_hess && !scaled_B) {
+            yy0 <- sum(y * y); sy0 <- sum(s * y)
+            if (is.finite(yy0) && yy0 > 1e-12 && is.finite(sy0) && sy0 > 1e-12) {
+              B <- diag(yy0 / sy0, n)
+              scaled_B <- TRUE
+            }
+          }
+          
           # Damped BFGS Update
           Bs <- as.numeric(B %*% s); sBs <- sum(s * Bs); sy <- sum(s * y)
           update_ok <- FALSE; y_star <- y; sy_star <- sy
@@ -234,7 +276,7 @@ dogleg <- function(
             if (sy_star > 1e-12) { y <- y_star; sy <- sy_star; update_ok <- TRUE }
           } else { if (sy > 1e-12) update_ok <- TRUE }
           
-          if (use_exact_hess) {
+          if (update_exact) {
             B_new <- tryCatch(hess_func(x_try), error = function(e) B)
             B_new <- 0.5 * (B_new + t(B_new))
             if (!is_pd_fast(B_new)) {
@@ -286,6 +328,8 @@ dogleg <- function(
     elapsed_time     = as.numeric(final_clock[3]), 
     max_grad         = as.numeric(g_inf), 
     Hessian          = H_eval,
-    approx_hessian   = B      
+    approx_hessian   = B,
+    pred_dec         = pred_dec,
+    pred_dec_avg     = pred_dec_avg
   )
 }

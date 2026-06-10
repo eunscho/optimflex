@@ -9,8 +9,6 @@ modified_newton(
   objective,
   gradient = NULL,
   hessian = NULL,
-  lower = -Inf,
-  upper = Inf,
   control = list(),
   ...
 )
@@ -23,10 +21,6 @@ modified_newton(
 \item{gradient}{Function (optional). Gradient of the objective function.}
 
 \item{hessian}{Function (optional). Hessian matrix of the objective function.}
-
-\item{lower}{Numeric vector. Lower bounds for box constraints.}
-
-\item{upper}{Numeric vector. Upper bounds for box constraints.}
 
 \item{control}{List. Control parameters including convergence flags:
 \itemize{
@@ -82,6 +76,7 @@ the gradient and Hessian:
 }
 }
 \examples{
+# Simple quadratic function optimization
 quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 res <- modified_newton(start = c(0, 0), objective = quad)
 print(res$par)

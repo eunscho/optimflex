@@ -11,8 +11,6 @@ gauss_newton(
   gradient = NULL,
   hessian = NULL,
   jac = NULL,
-  lower = -Inf,
-  upper = Inf,
   control = list(),
   ...
 )
@@ -29,10 +27,6 @@ gauss_newton(
 \item{hessian}{Function (optional). Hessian matrix of the objective function.}
 
 \item{jac}{Function (optional). Jacobian matrix of the residuals.}
-
-\item{lower}{Numeric vector. Lower bounds for box constraints.}
-
-\item{upper}{Numeric vector. Upper bounds for box constraints.}
 
 \item{control}{List. Control parameters including convergence flags:
 \itemize{
@@ -81,6 +75,7 @@ is singular or poorly conditioned for Cholesky decomposition, it iteratively
 adds a diagonal ridge \eqn{(\tau I)} until numerical stability is achieved.
 }
 \examples{
+# Simple quadratic function optimization
 quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
 res <- gauss_newton(start = c(0, 0), objective = quad)
 print(res$par)
