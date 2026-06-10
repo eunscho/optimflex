@@ -1,3 +1,10 @@
+# optimflex 0.1.8
+* Added `levenberg_marquardt()`: a Levenberg-Marquardt optimizer 
+* Fixed a bug in which `lower` and `upper` bounds were accepted but not
+  applied during optimization.
+* Fixed a bug in which some convergence criteria were accepted but not
+  evaluated.
+
 # optimflex 0.1.7
 * Fixed bugs in dogleg and double_dogleg so that when the user supplies an exact Hessian, it is used directly in the optimization rather than being overridden by the BFGS approximation.
 
