@@ -138,10 +138,8 @@ double_dogleg <- function(
   } else {
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
-  # FIX (4): mirror hess_func so the positive-definiteness check uses the supplied analytic
-  # Hessian when available (and the same numerical method otherwise), instead of always
-  # recomputing a forward-difference Hessian via fast_hess(). This also makes the final
-  # H_eval (used for Hess_is_pd and Hessian in the output) honor the analytic Hessian.
+  # Hessian used for the positive-definiteness check and the reported H_eval
+  # (honors a supplied analytic Hessian).
   hess_func_pd <- if (!is.null(hessian)) {
     function(z) hessian(z, ...)
   } else if (ctrl$diff_method == "richardson") {
@@ -181,7 +179,7 @@ double_dogleg <- function(
   }
   H_eval <- NULL; g_inf <- NA_real_
   pred_dec <- NA_real_; pred_dec_avg <- NA_real_
-  scaled_B <- FALSE   # FIX (2): tracks whether the one-time self-scaling of B has been applied
+  scaled_B <- FALSE   # whether the one-time self-scaling of B has been applied
   
   # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
@@ -286,12 +284,7 @@ double_dogleg <- function(
           if (update_exact) {
             B <- tryCatch(hess_func(x_try), error = function(e) B)
             B <- 0.5 * (B + t(B))
-            # Safeguard B to be positive definite before it is used in the next
-            # double-dogleg subproblem. Without this, an indefinite exact Hessian
-            # (common far from the solution) produces g'Bg < 0, which flips the
-            # Cauchy point into an ascent direction and stalls the trust region.
-            # Mirrors the safeguard applied to the initial B and to the exact
-            # branch of the BFGS path below.
+            # Safeguard B to be positive definite before the next subproblem.
             if (!is_pd_fast(B)) {
               ev <- eigen(B, symmetric = TRUE, only.values = TRUE)$values
               shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
@@ -301,11 +294,8 @@ double_dogleg <- function(
             Bs <- as.numeric(B %*% s); sBs <- sum(s * Bs); sy <- sum(s * y)
             
             # Initial Scaling
-            # FIX (2): trigger the one-time self-scaling on the first BFGS update via a flag
-            # (scaled_B) rather than it == 1L, so it still fires when the first iteration's
-            # step was rejected (in which case the first actual update happens at it > 1).
-            # Skipped when an analytic Hessian seeded B, so the accurate initial curvature
-            # scale is preserved (consistent with dogleg()).
+            # Self-scale B once on the first BFGS update; skipped when an analytic
+            # Hessian seeded B, preserving the initial curvature scale.
             if (!use_exact_hess && !scaled_B && is.finite(sy) && sy > 1e-12) {
               y_norm_sq <- sum(y * y)
               if (y_norm_sq > 1e-12) { B <- B * (y_norm_sq / sy); scaled_B <- TRUE }
@@ -328,21 +318,10 @@ double_dogleg <- function(
               if (is.finite(sy) && sy > 1e-12) update_ok <- TRUE
             }
             
-            if (use_exact_hess) {
-              B_new <- tryCatch(hess_func(x_try), error = function(e) B)
-              B_new <- 0.5 * (B_new + t(B_new))
-              if (!is_pd_fast(B_new)) {
-                ev <- eigen(B_new, symmetric = TRUE, only.values = TRUE)$values
-                shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
-                B <- B_new + diag(shift, n)
-              } else {
-                B <- B_new
-              }
-            } else {
-              if (update_ok) {
-                B <- B - (Bs %*% t(Bs)) / (sBs + 1e-16) + (y %*% t(y)) / (sy + 1e-16)
-                B <- 0.5 * (B + t(B))
-              }
+            # Damped BFGS update (a supplied analytic Hessian only seeds the initial B).
+            if (update_ok) {
+              B <- B - (Bs %*% t(Bs)) / (sBs + 1e-16) + (y %*% t(y)) / (sy + 1e-16)
+              B <- 0.5 * (B + t(B))
             }
           }
           
