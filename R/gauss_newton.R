@@ -191,10 +191,6 @@ gauss_newton <- function(
         it <- it + 1L; g_inf <- max(abs(g), na.rm = TRUE)
         
         # 4.1) Jacobian and Approximate Hessian (2 * J'J)
-        # J already corresponds to the current x: on the first iteration it was
-        # computed during initialization, and on subsequent iterations it was
-        # computed at the end of the previous iteration (after the line search).
-        # It is therefore reused here rather than recomputed.
         if (is.null(J) || any(!is.finite(J))) { status <- "jacobian_error"; break }
         
         # Calculate approx_hessian as 2*J'J to match Newton-Raphson scale

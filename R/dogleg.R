@@ -122,8 +122,7 @@ dogleg <- function(
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  # FIX (4): when an analytic Hessian is supplied, use it for the positive-definiteness
-  # check as well, instead of always recomputing a forward-difference Hessian via fast_hess().
+  # Hessian used for the positive-definiteness check (honors a supplied analytic Hessian).
   hess_func_pd <- if (!is.null(hessian)) {
     function(z) hessian(z, ...)
   } else {
@@ -165,7 +164,7 @@ dogleg <- function(
   }
   H_eval <- NULL; g_inf <- NA_real_
   pred_dec <- NA_real_; pred_dec_avg <- NA_real_
-  scaled_B <- FALSE   # FIX (2): tracks whether the one-time self-scaling of B has been applied
+  scaled_B <- FALSE   # whether the one-time self-scaling of B has been applied
   
   # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
@@ -187,8 +186,7 @@ dogleg <- function(
           B_f <- B[free_idx, free_idx, drop = FALSE]
           
           # 4.2) Subproblem: Newton Point and Cauchy Point
-          # FIX (1)/(3): factorize B_f only once (Cholesky) and reuse the factor to solve,
-          # instead of computing chol() merely as a test and then re-factorizing inside solve().
+          # Newton point from a single Cholesky factorization of B_f.
           pN_f <- tryCatch({
             R_f <- chol(B_f)
             backsolve(R_f, forwardsolve(t(R_f), -g_f))
@@ -252,11 +250,8 @@ dogleg <- function(
         if (rho > ctrl$rho_accept && actual_red > 0) {
           g_new <- grad_func(x_try); s <- x_try - x; y <- g_new - g
           
-          # FIX (2): self-scale the initial Hessian approximation on the first BFGS update
+          # Self-scale the initial B on the first BFGS update
           # (Nocedal & Wright 2006, eq. 6.20; direct-Hessian form B0 <- (y'y / s'y) I).
-          # This mirrors the initial scaling already used in bfgs(). It is applied before
-          # the curvature products below, so that both the damping step and the BFGS update
-          # operate on the scaled B. Only relevant for the quasi-Newton path.
           if (!use_exact_hess && !scaled_B) {
             yy0 <- sum(y * y); sy0 <- sum(s * y)
             if (is.finite(yy0) && yy0 > 1e-12 && is.finite(sy0) && sy0 > 1e-12) {
