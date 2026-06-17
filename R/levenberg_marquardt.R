@@ -72,9 +72,9 @@
 #' @examples
 #' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
-#' res <- marquardt_levenberg(start = c(0, 0), objective = quad)
+#' res <- levenberg_marquardt(start = c(0, 0), objective = quad)
 #' print(res$par)
-marquardt_levenberg <- function(
+levenberg_marquardt <- function(
     start,
     objective,
     gradient = NULL,
