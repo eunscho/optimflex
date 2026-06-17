@@ -1,63 +1,56 @@
-# ============================================================
-# Function: levenberg_marquardt
-# Description: Optimized LM for Least-Squares/SEM problems.
-# Features: fast_jac, max_time, Predicted Decrease (AND rule),
-#           and Hessian output.
-#   - control$diff_method ("forward" / "central" / "richardson")
-#   - Interface (input, output, convergence) synced with gauss_newton()
-#   - All internal quantities (gradient, Hessian approx, accept/reject)
-#     operate on the OBJECTIVE (F_ML) scale, consistent with the
-#     gradient-based convergence test. This matches gauss_newton().
-# ============================================================
-#' Levenberg-Marquardt Optimization
+#' Marquardt-Levenberg Optimization
 #'
 #' @description
-#' Implements a full-featured Levenberg-Marquardt algorithm for non-linear 
-#' optimization, specifically optimized for Structural Equation Modeling (SEM).
+#' Local optimizer based on the Marquardt-Levenberg algorithm. The search
+#' direction blends the Newton and steepest-descent directions through an
+#' adaptively damped, diagonally inflated Hessian, which keeps the local
+#' quadratic model positive-definite and yields a descent direction at every
+#' iteration. The function follows the common optimflex interface, so it shares
+#' the same arguments, control parameters, convergence criteria, box-constraint
+#' handling, and return structure as the other optimizers in the package.
 #'
 #' @details
-#' \code{levenberg_marquardt} is a specialized optimization algorithm for 
-#' least-squares and Maximum Likelihood problems where the objective function 
-#' can be expressed as a sum of squared residuals.
+#' \bold{Search direction.}
+#' At each iteration the step solves \eqn{(\tilde{H}) p = -g}, where \eqn{g} is
+#' the gradient and \eqn{\tilde{H}} is the Hessian (or its approximation) with an
+#' inflated diagonal in the Fletcher (1971) form:
+#' \deqn{\tilde{H}_{ii} = H_{ii} + da\,((1-ga)\,|H_{ii}| + ga\,tr),}
+#' with \eqn{tr} the mean of \eqn{|H_{ii}|}. The damping \eqn{da} (Marquardt's
+#' \eqn{\lambda}) and the curvature-mixing factor \eqn{ga} are increased until the
+#' inflated matrix admits a Cholesky factorization, guaranteeing a positive-definite
+#' model and a descent direction. A small \eqn{da} makes the step close to a Newton
+#' step; a large \eqn{da} drives it toward steepest descent. When a step improves
+#' the objective, \eqn{da} is decreased so the next step is more Newton-like; when
+#' it does not, the damping is increased and a backtracking line search shrinks the
+#' step length until the objective decreases.
 #'
-#' \bold{Scaling and SEM Consistency:}
-#' To ensure consistent simulation results and standard error (SE) calculations,
-#' this implementation adjusts the Gradient \eqn{(2J^T r)} and the Approximate
-#' Hessian \eqn{(2J^T J)} to match the scale of the Maximum Likelihood (ML)
-#' fitting function \eqn{F_{ML}}. The damped Newton step, the gain ratio, and the
-#' gradient-based convergence test all operate on this same scale so that the
-#' algorithm minimizes the actual objective rather than a residual surrogate.
+#' \bold{Hessian source (two modes).}
+#' \code{hessian_update = "exact"} recomputes the Hessian at every accepted step
+#' (only when an analytic Hessian is supplied). \code{hessian_update = "bfgs"}
+#' (the default) refines a Hessian approximation B with damped BFGS rank-two
+#' updates, using a supplied analytic Hessian (if any) only as the starting B.
 #'
-#' \bold{Comparison with Gauss-Newton:}
-#' Unlike \code{gauss_newton}, which uses a backtracking line search (Armijo),
-#' Levenberg-Marquardt controls step size via a damping parameter \eqn{\lambda}
-#' that interpolates between Gauss-Newton and gradient descent. The gain ratio
-#' (actual vs. predicted decrease) governs \eqn{\lambda} adjustment following
-#' Nielsen's (1999) update rule.
+#' \bold{Convergence.}
+#' Convergence is assessed with the package's standard criteria, combined with an
+#' AND rule: gradient norm, parameter and objective-function stability, and an
+#' optional positive-definiteness check at the candidate solution.
 #'
 #' @references
 #' \itemize{
-#'   \item Levenberg, K. (1944). A method for the solution of certain non-linear
-#'     problems in least squares. \emph{Quarterly of Applied Mathematics}, \bold{2}(2),
-#'     164--168. \doi{10.1090/qam/10666}
-#'
-#'   \item Marquardt, D. W. (1963). An algorithm for least-squares estimation of
-#'     nonlinear parameters. \emph{Journal of the Society for Industrial and Applied
-#'     Mathematics}, \bold{11}(2), 431--441. \doi{10.1137/0111030}
-#'
-#'   \item Nielsen, H. B. (1999). \emph{Damping parameter in Marquardt's method}
-#'     (Technical Report IMM-REP-1999-05). Technical University of Denmark.
-#'
-#'   \item Nocedal, J., & Wright, S. J. (2006). \emph{Numerical Optimization}
-#'     (2nd ed.). Springer. \doi{10.1007/978-0-387-40065-5}
+#'    \item Marquardt, D. W. (1963). An Algorithm for Least-Squares Estimation of
+#'          Nonlinear Parameters. SIAM Journal.
+#'    \item Fletcher, R. (1971). A modified Marquardt subroutine for nonlinear
+#'          least squares.
+#'    \item Philipps V., Hejblum B.P., Prague M., Commenges D., Proust-Lima C.
+#'          (2021). Robust and Efficient Optimization Using a Marquardt-Levenberg
+#'          Algorithm with R Package marqLevAlg. The R Journal.
+#'    \item Nocedal, J., & Wright, S. J. (2006). Numerical Optimization. Springer.
 #' }
 #'
 #' @param start Numeric vector. Starting values for the optimization parameters.
 #' @param objective Function. The objective function to minimize.
-#' @param residual Function (optional). Function that returns the residuals vector.
 #' @param gradient Function (optional). Gradient of the objective function.
 #' @param hessian Function (optional). Hessian matrix of the objective function.
-#' @param jac Function (optional). Jacobian matrix of the residuals.
 #' @param lower Numeric vector. Lower bounds for box constraints.
 #' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags:
@@ -70,39 +63,29 @@
 #'      \item \code{use_posdef}: Logical. Verify positive definiteness at convergence.
 #'      \item \code{use_pred_f}: Logical. Record predicted objective decrease.
 #'      \item \code{use_pred_f_avg}: Logical. Record average predicted decrease.
-#'      \item \code{diff_method}: String. Method for numerical differentiation.
-#'      \item \code{lambda_init}: Numeric. Initial damping parameter (LM-specific).
-#'      \item \code{lambda_factor}: Numeric. Multiplier for lambda on failure (LM-specific).
-#'      \item \code{lambda_max}: Numeric. Upper limit for lambda (LM-specific).
-#'      \item \code{max_time}: Numeric. Time limit in seconds (LM-specific).
+#'      \item \code{hessian_update}: "bfgs" (default) or "exact".
 #'    }
-#' @param ... Additional arguments passed to objective, residual, gradient, 
-#'   hessian, and jac functions.
+#' @param ... Additional arguments passed to objective, gradient, and Hessian functions.
 #'
 #' @return A list containing optimization results and iteration metadata.
 #' @export
 #' @examples
 #' # Simple quadratic function optimization
 #' quad <- function(x) (x[1] - 2)^2 + (x[2] + 1)^2
-#' quad_res <- function(x) c(x[1] - 2, x[2] + 1)
-#' res <- levenberg_marquardt(start = c(0, 0), objective = quad, residual = quad_res)
+#' res <- marquardt_levenberg(start = c(0, 0), objective = quad)
 #' print(res$par)
-levenberg_marquardt <- function(
+marquardt_levenberg <- function(
     start,
     objective,
-    residual       = NULL,
-    gradient       = NULL,
-    hessian        = NULL,
-    jac            = NULL,
-    lower          = -Inf,
-    upper          = Inf,
-    control        = list(),
+    gradient = NULL,
+    hessian  = NULL,
+    lower    = -Inf,
+    upper    = Inf,
+    control  = list(),
     ...
 ) {
-  
-  # ---------- 1. Default Configuration (Synced with Suite) ----------
+  # ---------- 1. Configuration ----------
   ctrl0 <- list(
-    # Convergence and recording flags
     use_abs_f       = FALSE,
     use_rel_f       = FALSE,
     use_abs_x       = FALSE,
@@ -112,8 +95,7 @@ levenberg_marquardt <- function(
     use_pred_f      = FALSE,
     use_pred_f_avg  = FALSE,
     
-    # Algorithm parameters
-    max_iter        = 1000L,
+    max_iter        = 10000L,
     tol_abs_f       = 1e-6,
     tol_rel_f       = 1e-6,
     tol_abs_x       = 1e-6,
@@ -121,196 +103,288 @@ levenberg_marquardt <- function(
     tol_grad        = 1e-4,
     tol_pred_f      = 1e-4,
     tol_pred_f_avg  = 1e-4,
-    diff_method     = "forward",
     
-    # LM-specific parameters
-    max_time        = Inf,
-    lambda_init     = 1e-3,
-    lambda_factor   = 10.0,
-    lambda_max      = 1e12,
-    eps             = 1e-5
+    H_init_diag     = 1.0,
+    diff_method     = "forward",
+    hessian_update  = "bfgs",
+    use_damped      = TRUE,
+    damp_phi        = 0.2,
+    
+    # Fletcher diagonal-inflation damping controls
+    da_init         = 1e-2,   # initial Marquardt damping (lambda)
+    ga_init         = 0.01,   # initial curvature-mixing factor (eta)
+    da_factor       = 5.0,    # multiplicative inflation factor
+    da_min          = 1e-7,   # floor for da before a successful step
+    gonfle_max      = 10L,    # max diagonal inflations per iteration
+    
+    # backtracking line search controls
+    ls_max          = 20L,    # max backtracking steps
+    ls_shrink       = 0.5,    # step-length shrink factor
+    ls_min_step     = 1e-14   # smallest step length before giving up
   )
   ctrl <- utils::modifyList(ctrl0, control)
-  ctrl$diff_method <- match.arg(ctrl$diff_method, c("forward", "central", "richardson"))
+  ctrl$hessian_update <- match.arg(ctrl$hessian_update, c("bfgs", "exact"))
   
-  if (ctrl$diff_method == "richardson") {
-    if (!requireNamespace("numDeriv", quietly = TRUE)) stop("Package 'numDeriv' required.")
-  }
-  
-  # ---------- 2. Internal Helpers (Synced with Suite) ----------
+  # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
   
   grad_func <- if (!is.null(gradient)) {
     function(z) as.numeric(gradient(z, ...))
-  } else if (ctrl$diff_method == "richardson") {
-    function(z) as.numeric(numDeriv::grad(objective, z, method = "Richardson", ...))
   } else {
     function(z) fast_grad(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
   hess_func <- if (!is.null(hessian)) {
     function(z) hessian(z, ...)
-  } else if (ctrl$diff_method == "richardson") {
-    function(z) numDeriv::hessian(objective, z, method = "Richardson", ...)
   } else {
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  jac_func <- if (!is.null(jac)) {
-    function(z) jac(z, ...)
-  } else if (!is.null(residual)) {
-    if (ctrl$diff_method == "richardson") {
-      function(z) numDeriv::jacobian(residual, z, method = "Richardson", ...)
-    } else {
-      function(z) fast_jac(residual, z, diff_method = ctrl$diff_method, ...)
-    }
+  # Hessian used for the positive-definiteness check (honors a supplied analytic Hessian).
+  hess_func_pd <- if (!is.null(hessian)) {
+    function(z) hessian(z, ...)
   } else {
-    NULL
+    function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  # Gradient on the objective (F_ML) scale.
-  # If an analytic gradient is supplied, use it directly; otherwise fall back
-  # to 2*J'r (the gradient of sum(r^2)), matching gauss_newton().
-  get_g <- function(curr_x, curr_J) {
-    if (!is.null(gradient)) return(grad_func(curr_x))
-    if (!is.null(residual)) return(as.numeric(2 * crossprod(curr_J, as.numeric(residual(curr_x, ...)))))
-    return(grad_func(curr_x))
+  project <- function(z, l, u) pmax(l, pmin(z, u))
+  
+  # Fletcher diagonal inflation of a symmetric matrix M.
+  # Increases da (and ga, after a few tries) until chol() succeeds, then returns
+  # the Cholesky factor R (upper triangular) of the inflated matrix together with
+  # the da/ga that worked. tr is the mean of the absolute diagonal of M.
+  inflate_and_chol <- function(M, da, ga) {
+    n_ <- nrow(M)
+    diagM <- diag(M)
+    tr <- mean(abs(diagM))
+    if (!is.finite(tr) || tr == 0) tr <- 1
+    
+    build <- function(da_, ga_) {
+      Mi <- M
+      add <- ifelse(diagM != 0,
+                    da_ * ((1 - ga_) * abs(diagM) + ga_ * tr),
+                    da_ * ga_ * tr)
+      diag(Mi) <- diagM + add
+      Mi
+    }
+    
+    ncount <- 0L
+    repeat {
+      Mi <- build(da, ga)
+      R <- tryCatch(chol(0.5 * (Mi + t(Mi))), error = function(e) NULL)
+      if (!is.null(R)) {
+        return(list(R = R, da = da, ga = ga, ok = TRUE))
+      }
+      ncount <- ncount + 1L
+      if (ncount <= 3L || ga >= 1) {
+        da <- da * ctrl$da_factor
+      } else {
+        ga <- ga * ctrl$da_factor
+        if (ga > 1) ga <- 1
+      }
+      if (ncount >= ctrl$gonfle_max) {
+        # Last resort: a strongly diagonally dominant fallback that is PD.
+        Mi <- build(da, ga)
+        diag(Mi) <- diag(Mi) + (abs(min(diag(Mi))) + 1) 
+        R <- tryCatch(chol(0.5 * (Mi + t(Mi))), error = function(e) NULL)
+        return(list(R = R, da = da, ga = ga, ok = !is.null(R)))
+      }
+    }
   }
   
   # ---------- 3. Initialization ----------
-  param_names <- names(start)
-  x <- as.numeric(start); n_par <- length(x)
+  x <- project(as.numeric(start), lower, upper)
+  n <- length(x)
+  
+  # start_clock defined here for CPU time calculation
   start_clock <- proc.time()
   
   f <- tryCatch(eval_obj(x), error = function(e) NA_real_)
-  it <- 0L; x_old <- x; f_old <- NA_real_; converged <- FALSE; status <- "running"
-  H_curr <- NULL; H_eval <- NULL; g_inf <- NA_real_; pred_dec <- NA_real_; pred_dec_avg <- NA_real_
+  it <- 0L; converged <- FALSE; status <- "running"
+  x_old <- x; f_old <- NA_real_
   
+  # Hessian-source mode flags.
+  # use_exact_hess: an analytic Hessian was supplied (used for the initial B and the
+  #   positive-definiteness check regardless of the update mode).
+  # update_exact: recompute the exact Hessian at every accepted step. Only when an
+  #   analytic Hessian is supplied AND hessian_update == "exact". Otherwise (the default
+  #   "bfgs"), B is refined with damped BFGS rank-two updates even if an analytic Hessian
+  #   was supplied, with that Hessian still used as the starting B.
+  use_exact_hess <- !is.null(hessian)
+  update_exact <- use_exact_hess && identical(ctrl$hessian_update, "exact")
+  
+  # Initialize Hessian (approximation) B.
+  B <- if (use_exact_hess) {
+    B_init <- tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
+    0.5 * (B_init + t(B_init))
+  } else {
+    diag(ctrl$H_init_diag, n)
+  }
+  
+  H_eval <- NULL; g_inf <- NA_real_
+  pred_dec <- NA_real_; pred_dec_avg <- NA_real_
+  scaled_B <- FALSE   # whether the one-time self-scaling of B has been applied (BFGS mode)
+  da <- ctrl$da_init   # current Marquardt damping, carried across iterations
+  
+  # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
     status <- "objective_error_at_start"
-  } else if (is.null(jac_func)) {
-    status <- "jacobian_unavailable"
   } else {
-    J <- jac_func(x)
-    if (is.null(J) || any(!is.finite(J))) {
-      status <- "jacobian_error_at_start"
-    } else {
-      # All quantities on the objective (F_ML) scale:
-      #   g      = grad of objective  (analytic, or 2*J'r)
-      #   H_curr = 2*J'J  (Gauss-Newton approximation of the objective Hessian)
-      g <- get_g(x, J)
-      H_curr <- 2 * crossprod(J)
-      
-      lambda <- ctrl$lambda_init
-      
-      # ---------- 4. Main Optimization Loop ----------
-      tryCatch({
-        repeat {
-          # Time limit check
-          if (as.numeric((proc.time() - start_clock)[3]) >= ctrl$max_time) { status <- "time_limit_reached"; break }
-          if (it >= ctrl$max_iter) { status <- "iteration_limit_reached"; break }
+    g <- grad_func(x)
+    
+    tryCatch({
+      repeat {
+        if (it >= ctrl$max_iter) { status <- "iteration_limit_reached"; break }
+        it <- it + 1L
+        
+        # 4.1) Free Variables Identification (for Box Constraints)
+        is_free <- !((x <= lower + 1e-10 & g > 0) | (x >= upper - 1e-10 & g < 0))
+        free_idx <- which(is_free); nfree <- length(free_idx)
+        
+        if (nfree > 0L) {
+          g_f <- g[free_idx]; g_inf <- max(abs(g_f), na.rm = TRUE)
+          B_f <- B[free_idx, free_idx, drop = FALSE]
           
-          it <- it + 1L
-          g_inf <- max(abs(g), na.rm = TRUE)
+          # 4.2) Damped step: inflate the diagonal (Fletcher) until Cholesky
+          #      succeeds, then solve (inflated B_f) p = -g_f via that factor.
+          infl <- inflate_and_chol(B_f, da, ctrl$ga_init)
+          R_f <- infl$R
+          ga_used <- infl$ga
+          da_used <- infl$da
           
-          # 4.1) Damped Newton (LM) Step on the objective scale:
-          #      (2*J'J + lambda*I) p = -g
-          p_step <- tryCatch({
-            H_mod <- H_curr
-            diag(H_mod) <- diag(H_mod) + lambda
-            solve(H_mod, -g)
-          }, error = function(e) NULL)
-          
-          if (is.null(p_step)) {
-            lambda <- lambda * ctrl$lambda_factor
-            if (lambda > ctrl$lambda_max) { status <- "singular_matrix_fail"; break }
-            next
-          }
-          
-          # 4.2) Predicted Decrease (objective scale): -(g'p + 0.5 p'H p)
-          Hp <- as.numeric(H_curr %*% p_step)
-          pred_dec <- as.numeric(-(sum(g * p_step) + 0.5 * sum(p_step * Hp)))
-          pred_dec_avg <- pred_dec / n_par
-          
-          # 4.3) Convergence Verification (matching gauss_newton)
-          res_conv <- TRUE
-          if (ctrl$use_grad)                     res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
-          if (ctrl$use_abs_f && !is.na(f_old))   res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
-          if (ctrl$use_rel_f && !is.na(f_old))   res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
-          if (ctrl$use_abs_x && it > 1L)         res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
-          if (ctrl$use_rel_x && it > 1L)         res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
-          if (isTRUE(ctrl$use_pred_f))           res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
-          if (isTRUE(ctrl$use_pred_f_avg))       res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
-          
-          if (res_conv && it > 1L) { converged <- TRUE; status <- "converged"; break }
-          
-          # 4.4) Trial Step and Gain Ratio (objective scale via eval_obj)
-          x_try <- x + p_step
-          f_try <- tryCatch(eval_obj(x_try), error = function(e) NA_real_)
-          
-          if (!is.finite(f_try)) {
-            lambda <- lambda * ctrl$lambda_factor
-            if (lambda > ctrl$lambda_max) { status <- "divergence_lambda_max"; break }
-            next
-          }
-          
-          actual_red <- f - f_try
-          rho <- if (is.finite(pred_dec) && abs(pred_dec) > 1e-18) actual_red / pred_dec else 0
-          
-          # 4.5) Accept / Reject Decision
-          if (rho > 1e-4 && actual_red > 0) {
-            x_old <- x; f_old <- f
-            x <- x_try; f <- f_try
-            
-            # Update Jacobian, gradient, and Hessian approximation
-            J <- jac_func(x)
-            if (is.null(J) || any(!is.finite(J))) { status <- "jacobian_error"; break }
-            g <- get_g(x, J)
-            H_curr <- 2 * crossprod(J)
-            
-            # Nielsen's lambda update
-            lambda <- lambda * max(1/3, 1 - (2 * rho - 1)^3)
-            lambda <- max(lambda, 1e-9)
-            
-            # Post-step convergence check (handles exact solutions, e.g., quadratics)
-            g_inf_new <- max(abs(g), na.rm = TRUE)
-            if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
-              g_inf <- g_inf_new
-              converged <- TRUE; status <- "converged"; break
-            }
+          if (is.null(R_f)) {
+            # Could not build a PD model; treat as a failed step (shrink via da).
+            p_f <- rep(0, nfree)
+            current_pred_dec <- 0
           } else {
-            lambda <- lambda * ctrl$lambda_factor
-            if (lambda > ctrl$lambda_max) { status <- "divergence_lambda_max"; break }
+            # solve (R'R) p = -g_f
+            p_f <- backsolve(R_f, forwardsolve(t(R_f), -g_f))
+            current_pred_dec <- as.numeric(-(sum(g_f * p_f) + 0.5 * sum(p_f * (B_f %*% p_f))))
+          }
+        } else {
+          g_inf <- 0; current_pred_dec <- 0
+          p_f <- numeric(0); ga_used <- ctrl$ga_init; da_used <- da
+        }
+        
+        # 4.3) Convergence Check
+        # The full set of convergence criteria is combined with an AND rule. All
+        # tests use the current point (before the step is taken).
+        pred_dec <- current_pred_dec
+        pred_dec_avg <- current_pred_dec / n
+        res_conv <- TRUE
+        if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+        if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
+        if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+        if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+        if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+        
+        if (res_conv && it > 1L) {
+          if (isTRUE(ctrl$use_posdef)) {
+            H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+            if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv <- FALSE
+          } else { converged <- TRUE; status <- "converged"; break }
+        }
+        
+        # 4.4) Step Acceptance with backtracking line search
+        # Try the full step; if it does not reduce f, backtrack by halving until it
+        # does or the step length becomes too small.
+        p_full <- rep(0, n); if (nfree > 0L) p_full[free_idx] <- p_f
+        
+        step_len <- 1.0
+        accepted <- FALSE
+        x_try <- x; f_try <- f
+        if (nfree > 0L && any(p_full != 0)) {
+          ls <- 0L
+          repeat {
+            x_cand <- project(x + step_len * p_full, lower, upper)
+            f_cand <- tryCatch(eval_obj(x_cand), error = function(e) NA_real_)
+            if (is.finite(f_cand) && f_cand < f) {
+              x_try <- x_cand; f_try <- f_cand; accepted <- TRUE
+              break
+            }
+            ls <- ls + 1L
+            step_len <- step_len * ctrl$ls_shrink
+            if (ls >= ctrl$ls_max || step_len < ctrl$ls_min_step) break
           }
         }
-      }, error = function(e) {
-        status <<- paste0("runtime_error: ", conditionMessage(e))
-      })
-    }
+        
+        actual_red <- f - f_try
+        
+        if (accepted && actual_red > 0) {
+          # Successful step: decrease damping (toward a more Newton-like step), with a floor.
+          da <- if (da_used < ctrl$da_min) ctrl$da_min else da_used / (ctrl$da_factor + 2)
+          
+          g_new <- grad_func(x_try); s <- x_try - x; y <- g_new - g
+          
+          # Self-scale the initial B on the first BFGS update
+          # (Nocedal & Wright 2006, eq. 6.20; direct-Hessian form B0 <- (y'y / s'y) I).
+          if (!use_exact_hess && !scaled_B) {
+            yy0 <- sum(y * y); sy0 <- sum(s * y)
+            if (is.finite(yy0) && yy0 > 1e-12 && is.finite(sy0) && sy0 > 1e-12) {
+              B <- diag(yy0 / sy0, n)
+              scaled_B <- TRUE
+            }
+          }
+          
+          # Damped BFGS Update
+          Bs <- as.numeric(B %*% s); sBs <- sum(s * Bs); sy <- sum(s * y)
+          update_ok <- FALSE; y_star <- y; sy_star <- sy
+          if (isTRUE(ctrl$use_damped)) {
+            if (sy < ctrl$damp_phi * sBs) {
+              theta_damp <- ((1 - ctrl$damp_phi) * sBs) / (sBs - sy)
+              y_star <- theta_damp * y + (1 - theta_damp) * Bs; sy_star <- sum(s * y_star)
+            }
+            if (sy_star > 1e-12) { y <- y_star; sy <- sy_star; update_ok <- TRUE }
+          } else { if (sy > 1e-12) update_ok <- TRUE }
+          
+          if (update_exact) {
+            B_new <- tryCatch(hess_func(x_try), error = function(e) B)
+            B <- 0.5 * (B_new + t(B_new))
+          } else {
+            if (update_ok) {
+              B <- B - (Bs %*% t(Bs)) / (sBs + 1e-16) + (y %*% t(y)) / (sy + 1e-16)
+              B <- 0.5 * (B + t(B))
+            }
+          }
+          
+          x_old <- x; f_old <- f; x <- x_try; f <- f_try; g <- g_new
+          
+          # Post-step convergence check (handles exact solutions, e.g., quadratics)
+          g_inf_new <- max(abs(g_new), na.rm = TRUE)
+          if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
+            g_inf <- g_inf_new
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
+            } else { converged <- TRUE; status <- "converged"; break }
+          }
+        } else {
+          # Failed step: increase damping so the next model is more conservative.
+          da <- da_used * ctrl$da_factor
+          if (da > 1e12) { status <- "damping_too_large"; break }
+        }
+      }
+    }, error = function(e) { status <<- paste0("runtime_error: ", conditionMessage(e)) })
   }
   
-  # ---------- 5. Finalization & Mandatory PD Check (matching gauss_newton) ----------
-  if (!is.null(param_names)) names(x) <- param_names
-  
-  if (converged) {
-    H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
-    Hess_pd <- if (!is.null(H_eval)) is_pd_fast(H_eval) else FALSE
-    
-    if (isTRUE(ctrl$use_posdef) && !Hess_pd) {
-      converged <- FALSE
-      status <- "converged_but_not_positive_definite"
-    }
-  } else {
-    Hess_pd <- FALSE
-  }
-  
-  H_final <- if (!is.null(H_eval)) H_eval else if (!is.null(H_curr)) H_curr else NA_real_
+  # ---------- 5. Final Reporting ----------
+  if (is.null(H_eval)) H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
   final_clock <- proc.time() - start_clock
   
-  list(par = x, objective = f, converged = converged, status = status, iter = it,
-       cpu_time = as.numeric(final_clock[1] + final_clock[2]),
-       elapsed_time = as.numeric(final_clock[3]),
-       max_grad = as.numeric(g_inf), Hess_is_pd = Hess_pd,
-       Hessian = H_final, approx_hessian = H_curr,
-       pred_dec = pred_dec, pred_dec_avg = pred_dec_avg)
+  list(
+    par              = x,
+    objective        = f,
+    converged        = converged,
+    status           = status,
+    iter             = it,
+    cpu_time         = as.numeric(final_clock[1] + final_clock[2]),
+    elapsed_time     = as.numeric(final_clock[3]),
+    max_grad         = as.numeric(g_inf),
+    Hessian          = H_eval,
+    approx_hessian   = B,
+    pred_dec         = pred_dec,
+    pred_dec_avg     = pred_dec_avg
+  )
 }
