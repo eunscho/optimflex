@@ -216,7 +216,12 @@ levenberg_marquardt <- function(
   # Initialize Hessian (approximation) B.
   B <- if (use_exact_hess) {
     B_init <- tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
-    0.5 * (B_init + t(B_init))
+    B_init <- 0.5 * (B_init + t(B_init))
+    if (!is_pd_fast(B_init)) {
+      ev <- eigen(B_init, symmetric = TRUE, only.values = TRUE)$values
+      shift <- max(abs(min(ev)) + 1e-6, max(abs(ev)) * 1e-7)
+      B_init + diag(shift, n)
+    } else B_init
   } else {
     diag(ctrl$H_init_diag, n)
   }
