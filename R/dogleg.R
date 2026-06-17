@@ -41,6 +41,13 @@
 #' @param objective Function. The objective function to minimize.
 #' @param gradient Function (optional). Gradient of the objective function.
 #' @param hessian Function (optional). Hessian matrix of the objective function.
+#' @param gn_hessian Function (optional). Gauss-Newton curvature (e.g. 2 * t(J) %*% J)
+#'   used as the iteration curvature B in place of \code{hessian}, recomputed at every
+#'   accepted step (damped Gauss-Newton). When supplied, the positive-definiteness check
+#'   at convergence still uses \code{hessian} (the observed Hessian), so a Gauss-Newton
+#'   curvature - which is positive definite by construction - does not make that check
+#'   vacuous. If \code{hessian} is omitted, the check falls back to finite differences
+#'   of the objective.
 #' @param lower Numeric vector. Lower bounds for box constraints.
 #' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags:
@@ -68,6 +75,7 @@ dogleg <- function(
     objective, 
     gradient = NULL, 
     hessian  = NULL, 
+    gn_hessian = NULL,
     lower    = -Inf, 
     upper    = Inf,
     control  = list(), 
@@ -116,13 +124,19 @@ dogleg <- function(
     function(z) fast_grad(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  hess_func <- if (!is.null(hessian)) {
+  # Iteration curvature B: prefer an explicit Gauss-Newton curvature when supplied,
+  # otherwise the supplied Hessian, otherwise finite differences of the objective.
+  hess_func <- if (!is.null(gn_hessian)) {
+    function(z) gn_hessian(z, ...)
+  } else if (!is.null(hessian)) {
     function(z) hessian(z, ...)
   } else {
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  # Hessian used for the positive-definiteness check (honors a supplied analytic Hessian).
+  # Hessian used for the positive-definiteness check. Always the observed Hessian
+  # (a supplied analytic Hessian, else finite differences) - never gn_hessian, which is
+  # positive definite by construction and would make the check vacuous.
   hess_func_pd <- if (!is.null(hessian)) {
     function(z) hessian(z, ...)
   } else {
@@ -143,14 +157,16 @@ dogleg <- function(
   x_old <- x; f_old <- NA_real_; delta <- ctrl$initial_delta
   
   # Initialize Hessian approximation (B)
-  # use_exact_hess: an analytic Hessian was supplied (used for the initial B and the
-  #   positive-definiteness check regardless of the update mode).
-  # update_exact: recompute the exact Hessian at every accepted step. Only when an
-  #   analytic Hessian is supplied AND hessian_update == "exact". Otherwise (the default
-  #   "bfgs"), B is refined with damped BFGS rank-two updates even if an analytic Hessian
-  #   was supplied, with that Hessian still used as the starting B.
-  use_exact_hess <- !is.null(hessian)
-  update_exact <- use_exact_hess && identical(ctrl$hessian_update, "exact")
+  # use_exact_hess: an iteration curvature was supplied - either a Gauss-Newton curvature
+  #   (gn_hessian) or a Hessian - and is used to initialize B. The positive-definiteness
+  #   check at convergence always uses the observed Hessian (hessian / finite differences),
+  #   never gn_hessian.
+  # update_exact: recompute the iteration curvature exactly at every accepted step. True
+  #   when a Gauss-Newton curvature is supplied, or when a Hessian is supplied AND
+  #   hessian_update == "exact". Otherwise (the default "bfgs") B is refined with damped
+  #   BFGS rank-two updates from the supplied starting Hessian.
+  use_exact_hess <- !is.null(gn_hessian) || !is.null(hessian)
+  update_exact <- use_exact_hess && (!is.null(gn_hessian) || identical(ctrl$hessian_update, "exact"))
   B <- if (use_exact_hess) {
     B_init <- tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
     B_init <- 0.5 * (B_init + t(B_init))
