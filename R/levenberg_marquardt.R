@@ -1,7 +1,7 @@
-#' Levenberg-Marquardt Optimization
+#' Marquardt-Levenberg Optimization
 #'
 #' @description
-#' Local optimizer based on the Levenberg-Marquardt algorithm. The search
+#' Local optimizer based on the Marquardt-Levenberg algorithm. The search
 #' direction blends the Newton and steepest-descent directions through an
 #' adaptively damped, diagonally inflated Hessian, which keeps the local
 #' quadratic model positive-definite and yields a descent direction at every
@@ -58,6 +58,8 @@
 #'   curvature - which is positive definite by construction - does not make that check
 #'   vacuous. If \code{hessian} is omitted, the check falls back to finite differences
 #'   of the objective.
+#' @param residual Function (optional). Residual vector r(x); together with \code{jac}, activates a Gauss-Newton least-squares mode.
+#' @param jac Function (optional). Jacobian of the residual, J(x) = d r / d x.
 #' @param lower Numeric vector. Lower bounds for box constraints.
 #' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags:
@@ -87,6 +89,8 @@ levenberg_marquardt <- function(
     gradient = NULL,
     hessian  = NULL,
     gn_hessian = NULL,
+    residual = NULL,
+    jac      = NULL,
     lower    = -Inf,
     upper    = Inf,
     control  = list(),
@@ -132,6 +136,9 @@ levenberg_marquardt <- function(
   )
   ctrl <- utils::modifyList(ctrl0, control)
   ctrl$hessian_update <- match.arg(ctrl$hessian_update, c("bfgs", "exact"))
+
+  # Least-squares mode is used only when both residual and jac are supplied.
+  ls_mode <- !is.null(residual) && !is.null(jac)
   
   # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
@@ -250,6 +257,91 @@ levenberg_marquardt <- function(
   # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
     status <- "objective_error_at_start"
+  } else if (ls_mode) {
+    # ---------- Least-squares mode (residual + jac): damped Gauss-Newton via QR ----------
+    # Activated only when both residual and jac are supplied. g = 2 J'r, and the damped
+    # Gauss-Newton step solves (2 J'J + da I) p = -g as a linear least-squares problem in J
+    # augmented with sqrt(da) I, so 2 J'J is not assembled for the solve. The Marquardt
+    # damping da is decreased after a successful step and increased after a failed one,
+    # with the same convergence tests, line search, and positive-definiteness check.
+    r <- as.numeric(residual(x, ...))
+    J <- matrix(as.numeric(jac(x, ...)), nrow = length(r))
+    g <- 2 * as.numeric(crossprod(J, r))
+
+    tryCatch({
+      repeat {
+        if (it >= ctrl$max_iter) { status <- "iteration_limit_reached"; break }
+        it <- it + 1L
+        g_inf <- max(abs(g), na.rm = TRUE)
+
+        # Damped Gauss-Newton step via augmented QR of [sqrt(2) J; sqrt(da) I].
+        p_step <- tryCatch({
+          A_aug <- rbind(sqrt(2) * J, sqrt(da) * diag(n))
+          qr.solve(A_aug, c(-sqrt(2) * r, rep(0, n)))
+        }, error = function(e) NULL)
+        if (is.null(p_step) || any(!is.finite(p_step))) {
+          current_pred_dec <- 0
+        } else {
+          Jp <- as.numeric(J %*% p_step)
+          current_pred_dec <- as.numeric(-(sum(g * p_step) + sum(Jp^2)))
+        }
+
+        pred_dec <- current_pred_dec
+        pred_dec_avg <- current_pred_dec / n
+        res_conv <- TRUE
+        if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+        if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
+        if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+        if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+        if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+
+        if (res_conv && it > 1L) {
+          if (isTRUE(ctrl$use_posdef)) {
+            H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+            if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv <- FALSE
+          } else { converged <- TRUE; status <- "converged"; break }
+        }
+
+        # Step acceptance with backtracking line search.
+        accepted <- FALSE; x_try <- x; f_try <- f
+        if (!is.null(p_step) && any(p_step != 0)) {
+          step_len <- 1.0; ls <- 0L
+          repeat {
+            x_cand <- project(x + step_len * p_step, lower, upper)
+            f_cand <- tryCatch(eval_obj(x_cand), error = function(e) NA_real_)
+            if (is.finite(f_cand) && f_cand < f) { x_try <- x_cand; f_try <- f_cand; accepted <- TRUE; break }
+            ls <- ls + 1L; step_len <- step_len * ctrl$ls_shrink
+            if (ls >= ctrl$ls_max || step_len < ctrl$ls_min_step) break
+          }
+        }
+        actual_red <- f - f_try
+
+        if (accepted && actual_red > 0) {
+          # Successful step: decrease damping (toward a more Newton-like step), with a floor.
+          da <- if (da < ctrl$da_min) ctrl$da_min else da / (ctrl$da_factor + 2)
+          x_old <- x; f_old <- f; x <- x_try; f <- f_try
+          r <- as.numeric(residual(x, ...)); J <- matrix(as.numeric(jac(x, ...)), nrow = length(r))
+          g <- 2 * as.numeric(crossprod(J, r))
+
+          # Post-step convergence check (handles exact solutions).
+          g_inf_new <- max(abs(g), na.rm = TRUE)
+          if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
+            g_inf <- g_inf_new
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
+            } else { converged <- TRUE; status <- "converged"; break }
+          }
+        } else {
+          # Failed step: increase damping so the next model is more conservative.
+          da <- da * ctrl$da_factor
+          if (da > 1e12) { status <- "damping_too_large"; break }
+        }
+      }
+    }, error = function(e) { status <<- paste0("runtime_error: ", conditionMessage(e)) })
+    B <- 2 * crossprod(J)   # Gauss-Newton Hessian for the approx_hessian return field
   } else {
     g <- grad_func(x)
     
