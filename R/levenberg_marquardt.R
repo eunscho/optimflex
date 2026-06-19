@@ -1,7 +1,7 @@
-#' Marquardt-Levenberg Optimization
+#' Levenberg-Marquardt Optimization
 #'
 #' @description
-#' Local optimizer based on the Marquardt-Levenberg algorithm. The search
+#' Local optimizer based on the Levenberg-Marquardt algorithm. The search
 #' direction blends the Newton and steepest-descent directions through an
 #' adaptively damped, diagonally inflated Hessian, which keeps the local
 #' quadratic model positive-definite and yields a descent direction at every
