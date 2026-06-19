@@ -54,6 +54,8 @@
 #'   curvature - which is positive definite by construction - does not make that check
 #'   vacuous. If \code{hessian} is omitted, the check falls back to finite differences
 #'   of the objective.
+#' @param residual Function (optional). Residual vector r(x); together with \code{jac}, activates a Gauss-Newton least-squares mode.
+#' @param jac Function (optional). Jacobian of the residual, J(x) = d r / d x.
 #' @param lower Numeric vector. Lower bounds for box constraints.
 #' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags starting with 'use_'.
@@ -82,6 +84,8 @@ double_dogleg <- function(
     gradient = NULL, 
     hessian  = NULL, 
     gn_hessian = NULL,
+    residual = NULL,
+    jac      = NULL,
     lower    = -Inf, 
     upper    = Inf,
     control  = list(), 
@@ -123,6 +127,9 @@ double_dogleg <- function(
   ctrl <- utils::modifyList(ctrl0, control)
   ctrl$diff_method <- match.arg(ctrl$diff_method, c("forward", "central", "richardson"))
   ctrl$hessian_update <- match.arg(ctrl$hessian_update, c("bfgs", "exact"))
+
+  # Least-squares mode is used only when both residual and jac are supplied.
+  ls_mode <- !is.null(residual) && !is.null(jac)
   
   if (ctrl$diff_method == "richardson") {
     if (!requireNamespace("numDeriv", quietly = TRUE)) stop("Package 'numDeriv' required.")
@@ -199,6 +206,93 @@ double_dogleg <- function(
   # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
     status <- "objective_error_at_start"
+  } else if (ls_mode) {
+    # ---------- Least-squares mode (residual + jac): Gauss-Newton double dogleg via QR ----------
+    # Activated only when both residual and jac are supplied. The Gauss-Newton point is the
+    # least-squares solution of min || -r - J p || obtained from J (2 J'J is not assembled
+    # for the solve); g = 2 J'r, the curvature is 2 J'J, and the double-dogleg bias point
+    # pW = gamma * pN uses gamma = dd_bias * ||g||^4 / ((g' B g)(g' B^{-1} g)) with
+    # g' B^{-1} g = -g' pN. The path is restricted to the trust region of radius delta.
+    r <- as.numeric(residual(x, ...))
+    J <- matrix(as.numeric(jac(x, ...)), nrow = length(r))
+    g <- 2 * as.numeric(crossprod(J, r))
+    tryCatch({
+      repeat {
+        if (it >= ctrl$max_iter) { status <- "iteration_limit_reached"; break }
+        it <- it + 1L
+        g_inf <- max(abs(g), na.rm = TRUE)
+
+        # Gauss-Newton point via QR; small ridge fallback if rank-deficient.
+        pN <- tryCatch(qr.solve(J, -r), error = function(e) {
+          A <- rbind(J, sqrt(ctrl$ridge_eps) * diag(n)); qr.solve(A, c(-r, rep(0, n)))
+        })
+        gnorm <- sqrt(sum(g^2)); Jg <- as.numeric(J %*% g); gBg <- 2 * sum(Jg^2)
+        alpha_c <- if (gBg > 1e-15) (gnorm^2) / gBg else delta / max(gnorm, 1e-12)
+        pC <- -alpha_c * g
+
+        ghinvg <- sum(g * (-pN))                                   # g' B^{-1} g = -g' pN
+        gamma <- if (ghinvg > 1e-15 && gBg > 1e-15) ctrl$dd_bias * (gnorm^4 / (gBg * ghinvg)) else 1.0
+        gamma <- max(alpha_c, min(1.0, gamma))
+        pW <- gamma * pN
+
+        nPN <- sqrt(sum(pN^2)); nPC <- sqrt(sum(pC^2)); nPW <- sqrt(sum(pW^2))
+        if (nPN <= delta) {
+          p <- pN
+        } else if (nPC >= delta) {
+          p <- (delta / nPC) * pC
+        } else if (nPW <= delta) {
+          d <- (pN - pW); aa <- sum(d^2); bb <- 2 * sum(pW * d); cc <- sum(pW^2) - delta^2
+          tau <- (-bb + sqrt(max(0, bb^2 - 4 * aa * cc))) / (2 * (aa + 1e-16))
+          p <- pW + tau * d
+        } else {
+          d <- (pW - pC); aa <- sum(d^2); bb <- 2 * sum(pC * d); cc <- sum(pC^2) - delta^2
+          tau <- (-bb + sqrt(max(0, bb^2 - 4 * aa * cc))) / (2 * (aa + 1e-16))
+          p <- pC + tau * d
+        }
+        Jp <- as.numeric(J %*% p)
+        current_pred_dec <- as.numeric(-(sum(g * p) + sum(Jp^2)))
+
+        pred_dec <- current_pred_dec; pred_dec_avg <- current_pred_dec / n
+        res_conv <- TRUE
+        if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+        if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
+        if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+        if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+        if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+
+        if (res_conv && it > 1) {
+          if (isTRUE(ctrl$use_posdef)) {
+            H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+            if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv <- FALSE
+          } else { converged <- TRUE; status <- "converged"; break }
+        }
+
+        x_try <- pmax(lower, pmin(x + p, upper)); f_try <- eval_obj(x_try)
+        actual_red <- f - f_try
+        rho <- if (is.finite(current_pred_dec) && current_pred_dec > 1e-15) actual_red / current_pred_dec else 0
+
+        if (rho > ctrl$rho_accept && actual_red > 0) {
+          x_old <- x; f_old <- f; x <- x_try; f <- f_try
+          r <- as.numeric(residual(x, ...)); J <- matrix(as.numeric(jac(x, ...)), nrow = length(r))
+          g <- 2 * as.numeric(crossprod(J, r))
+          g_inf_new <- max(abs(g), na.rm = TRUE)
+          if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
+            g_inf <- g_inf_new
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
+            } else { converged <- TRUE; status <- "converged"; break }
+          }
+          if (rho > ctrl$rho_expand) delta <- min(ctrl$delta_max, ctrl$delta_expand * delta)
+        } else {
+          delta <- ctrl$delta_shrink * delta
+          if (delta < 1e-14) { status <- "radius_too_small"; break }
+        }
+      }
+    }, error = function(e) { status <<- paste0("runtime_error: ", conditionMessage(e)) })
+    B <- 2 * crossprod(J)   # Gauss-Newton Hessian for the approx_hessian return field
   } else {
     g <- grad_func(x)
     

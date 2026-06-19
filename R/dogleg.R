@@ -41,13 +41,8 @@
 #' @param objective Function. The objective function to minimize.
 #' @param gradient Function (optional). Gradient of the objective function.
 #' @param hessian Function (optional). Hessian matrix of the objective function.
-#' @param gn_hessian Function (optional). Gauss-Newton curvature (e.g. 2 * t(J) %*% J)
-#'   used as the iteration curvature B in place of \code{hessian}, recomputed at every
-#'   accepted step (damped Gauss-Newton). When supplied, the positive-definiteness check
-#'   at convergence still uses \code{hessian} (the observed Hessian), so a Gauss-Newton
-#'   curvature - which is positive definite by construction - does not make that check
-#'   vacuous. If \code{hessian} is omitted, the check falls back to finite differences
-#'   of the objective.
+#' @param residual Function (optional). Residual vector r(x); together with \code{jac}, activates a Gauss-Newton least-squares mode.
+#' @param jac Function (optional). Jacobian of the residual, J(x) = d r / d x.
 #' @param lower Numeric vector. Lower bounds for box constraints.
 #' @param upper Numeric vector. Upper bounds for box constraints.
 #' @param control List. Control parameters including convergence flags:
@@ -75,7 +70,8 @@ dogleg <- function(
     objective, 
     gradient = NULL, 
     hessian  = NULL, 
-    gn_hessian = NULL,
+    residual = NULL,
+    jac      = NULL,
     lower    = -Inf, 
     upper    = Inf,
     control  = list(), 
@@ -114,6 +110,9 @@ dogleg <- function(
   )
   ctrl <- utils::modifyList(ctrl0, control)
   ctrl$hessian_update <- match.arg(ctrl$hessian_update, c("bfgs", "exact"))
+
+  # Least-squares mode is used only when both residual and jac are supplied.
+  ls_mode <- !is.null(residual) && !is.null(jac)
   
   # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
@@ -124,19 +123,13 @@ dogleg <- function(
     function(z) fast_grad(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  # Iteration curvature B: prefer an explicit Gauss-Newton curvature when supplied,
-  # otherwise the supplied Hessian, otherwise finite differences of the objective.
-  hess_func <- if (!is.null(gn_hessian)) {
-    function(z) gn_hessian(z, ...)
-  } else if (!is.null(hessian)) {
+  hess_func <- if (!is.null(hessian)) {
     function(z) hessian(z, ...)
   } else {
     function(z) fast_hess(objective, z, diff_method = ctrl$diff_method, ...)
   }
   
-  # Hessian used for the positive-definiteness check. Always the observed Hessian
-  # (a supplied analytic Hessian, else finite differences) - never gn_hessian, which is
-  # positive definite by construction and would make the check vacuous.
+  # Hessian used for the positive-definiteness check (honors a supplied analytic Hessian).
   hess_func_pd <- if (!is.null(hessian)) {
     function(z) hessian(z, ...)
   } else {
@@ -157,16 +150,14 @@ dogleg <- function(
   x_old <- x; f_old <- NA_real_; delta <- ctrl$initial_delta
   
   # Initialize Hessian approximation (B)
-  # use_exact_hess: an iteration curvature was supplied - either a Gauss-Newton curvature
-  #   (gn_hessian) or a Hessian - and is used to initialize B. The positive-definiteness
-  #   check at convergence always uses the observed Hessian (hessian / finite differences),
-  #   never gn_hessian.
-  # update_exact: recompute the iteration curvature exactly at every accepted step. True
-  #   when a Gauss-Newton curvature is supplied, or when a Hessian is supplied AND
-  #   hessian_update == "exact". Otherwise (the default "bfgs") B is refined with damped
-  #   BFGS rank-two updates from the supplied starting Hessian.
-  use_exact_hess <- !is.null(gn_hessian) || !is.null(hessian)
-  update_exact <- use_exact_hess && (!is.null(gn_hessian) || identical(ctrl$hessian_update, "exact"))
+  # use_exact_hess: an analytic Hessian was supplied (used for the initial B and the
+  #   positive-definiteness check regardless of the update mode).
+  # update_exact: recompute the exact Hessian at every accepted step. Only when an
+  #   analytic Hessian is supplied AND hessian_update == "exact". Otherwise (the default
+  #   "bfgs"), B is refined with damped BFGS rank-two updates even if an analytic Hessian
+  #   was supplied, with that Hessian still used as the starting B.
+  use_exact_hess <- !is.null(hessian)
+  update_exact <- use_exact_hess && identical(ctrl$hessian_update, "exact")
   B <- if (use_exact_hess) {
     B_init <- tryCatch(hess_func(x), error = function(e) diag(ctrl$H_init_diag, n))
     B_init <- 0.5 * (B_init + t(B_init))
@@ -185,6 +176,83 @@ dogleg <- function(
   # ---------- 4. Main Loop ----------
   if (!is.finite(f)) {
     status <- "objective_error_at_start"
+  } else if (ls_mode) {
+    # ---------- Least-squares mode (residual + jac): Gauss-Newton dogleg via QR ----------
+    # Activated only when both residual and jac are supplied. The Gauss-Newton point is the
+    # least-squares solution of min || -r - J p || obtained from J (2 J'J is not assembled
+    # for the solve); the Cauchy point and quadratic model use g = 2 J'r and curvature 2 J'J,
+    # and the dogleg path between them is restricted to the trust region of radius delta.
+    r <- as.numeric(residual(x, ...))
+    J <- matrix(as.numeric(jac(x, ...)), nrow = length(r))
+    g <- 2 * as.numeric(crossprod(J, r))
+    tryCatch({
+      repeat {
+        if (it >= ctrl$max_iter) { status <- "iteration_limit_reached"; break }
+        it <- it + 1L
+        g_inf <- max(abs(g), na.rm = TRUE)
+
+        # Gauss-Newton point via QR; small ridge fallback if rank-deficient.
+        pN <- tryCatch(qr.solve(J, -r), error = function(e) {
+          A <- rbind(J, sqrt(1e-10) * diag(n)); qr.solve(A, c(-r, rep(0, n)))
+        })
+        gnorm <- sqrt(sum(g^2)); Jg <- as.numeric(J %*% g); gBg <- 2 * sum(Jg^2)
+        alpha_c <- if (gBg > 1e-15) (gnorm^2) / gBg else delta / max(gnorm, 1e-12)
+        pC <- -alpha_c * g
+        nPN <- sqrt(sum(pN^2)); nPC <- sqrt(sum(pC^2))
+
+        if (nPN <= delta) {
+          p <- pN
+        } else if (nPC >= delta) {
+          p <- (delta / nPC) * pC
+        } else {
+          d_v <- (pN - pC); aa <- sum(d_v^2); bb <- 2 * sum(pC * d_v); cc <- sum(pC^2) - delta^2
+          tau <- (-bb + sqrt(max(0, bb^2 - 4 * aa * cc))) / (2 * (aa + 1e-16))
+          p <- pC + tau * d_v
+        }
+        Jp <- as.numeric(J %*% p)
+        current_pred_dec <- as.numeric(-(sum(g * p) + sum(Jp^2)))
+
+        pred_dec <- current_pred_dec; pred_dec_avg <- current_pred_dec / n
+        res_conv <- TRUE
+        if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+        if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
+        if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+        if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+        if (ctrl$use_rel_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+
+        if (res_conv && it > 1L) {
+          if (isTRUE(ctrl$use_posdef)) {
+            H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+            if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break } else res_conv <- FALSE
+          } else { converged <- TRUE; status <- "converged"; break }
+        }
+
+        x_try <- project(x + p, lower, upper); f_try <- eval_obj(x_try)
+        actual_red <- f - f_try
+        rho <- if (is.finite(current_pred_dec) && current_pred_dec > 1e-15) actual_red / current_pred_dec else 0
+
+        if (rho > ctrl$rho_accept && actual_red > 0) {
+          x_old <- x; f_old <- f; x <- x_try; f <- f_try
+          r <- as.numeric(residual(x, ...)); J <- matrix(as.numeric(jac(x, ...)), nrow = length(r))
+          g <- 2 * as.numeric(crossprod(J, r))
+          g_inf_new <- max(abs(g), na.rm = TRUE)
+          if (ctrl$use_grad && g_inf_new <= ctrl$tol_grad) {
+            g_inf <- g_inf_new
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func_pd(x), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) { converged <- TRUE; status <- "converged"; break }
+            } else { converged <- TRUE; status <- "converged"; break }
+          }
+          if (rho > ctrl$rho_expand) delta <- min(ctrl$delta_max, ctrl$delta_expand * delta)
+        } else {
+          delta <- ctrl$delta_shrink * delta
+          if (delta < 1e-14) { status <- "radius_too_small"; break }
+        }
+      }
+    }, error = function(e) { status <<- paste0("runtime_error: ", conditionMessage(e)) })
+    B <- 2 * crossprod(J)   # Gauss-Newton Hessian for the approx_hessian return field
   } else {
     g <- grad_func(x)
     
