@@ -109,12 +109,9 @@ modified_newton <- function(
   # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
   
-  # Convergence test shared by the main loop (4.3) and the line-search-failure branch
-  # (4.4). Returns only whether the enabled stopping criteria are met; the positive-
-  # definiteness check and status assignment stay at the call sites, so each caller keeps
-  # its own handling of the non-PD case. All criteria are read from ctrl, so enabling or
-  # disabling any flag affects every place convergence is tested, with no hidden subset.
-  # cur_it is the iteration count used by the it > 1L guards on the parameter-change tests.
+  # Shared convergence test for the main loop (4.3) and the line-search-failure branch.
+  # Returns only whether the enabled stopping criteria are met; posdef checks and status
+  # assignment stay at the call sites. All criteria are read from ctrl.
   check_convergence <- function(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, cur_it) {
     res_conv <- TRUE
     if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
@@ -222,12 +219,9 @@ modified_newton <- function(
           alpha <- alpha * 0.5 
         }
         if (!ls_ok) {
-          # Line search failed. Before declaring failure, re-check convergence at the
-          # current point with the SAME criteria as 4.3 (via check_convergence), so any
-          # user-selected stopping rule is honored here too. x, f, and g are unchanged
-          # in this branch, so the values passed match those tested at the top of this
-          # iteration; only the positive-definiteness handling differs (a failed line
-          # search at a non-PD point is treated as a genuine failure, not convergence).
+          # Re-check convergence at the current point before failing: a line search can
+          # fail simply because g ~ 0 (nothing left to decrease). Same criteria as 4.3,
+          # but a non-PD point here is a genuine failure rather than convergence.
           res_conv <- check_convergence(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, it)
           if (res_conv) {
             if (isTRUE(ctrl$use_posdef)) {
