@@ -109,6 +109,28 @@ modified_newton <- function(
   # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
   
+  # Convergence test shared by the main loop (4.3) and the line-search-failure branch
+  # (4.4). Returns only whether the enabled stopping criteria are met; the positive-
+  # definiteness check and status assignment stay at the call sites, so each caller keeps
+  # its own handling of the non-PD case. All criteria are read from ctrl, so enabling or
+  # disabling any flag affects every place convergence is tested, with no hidden subset.
+  # cur_it is the iteration count used by the it > 1L guards on the parameter-change tests.
+  check_convergence <- function(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, cur_it) {
+    res_conv <- TRUE
+    if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+    if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
+    if (ctrl$use_rel_f && !is.na(f_old)) {
+      res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+    }
+    if (ctrl$use_abs_x && cur_it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+    if (ctrl$use_rel_x && cur_it > 1L) {
+      res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old))) <= ctrl$tol_rel_x)
+    }
+    if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+    if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+    res_conv
+  }
+  
   grad_func <- if (!is.null(gradient)) {
     function(z) as.numeric(gradient(z, ...))
   } else if (ctrl$grad_diff == "richardson") {
@@ -181,19 +203,8 @@ modified_newton <- function(
           pred_dec <- as.numeric(-(gTp + 0.5 * sum(step * (H_used %*% step)))); pred_dec_avg <- pred_dec / n
         }
         
-        # 4.3) Convergence Verification (Accessing flags via ctrl$)
-        res_conv <- TRUE
-        if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
-        if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
-        if (ctrl$use_rel_f && !is.na(f_old)) {
-          res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
-        }
-        if (ctrl$use_abs_x && it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
-        if (ctrl$use_rel_x && it > 1L) {
-          res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old))) <= ctrl$tol_rel_x)
-        }
-        if (isTRUE(ctrl$use_pred_f)) res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
-        if (isTRUE(ctrl$use_pred_f_avg)) res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+        # 4.3) Convergence Verification (shared check_convergence, all ctrl flags honored)
+        res_conv <- check_convergence(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, it)
         
         if (res_conv) {
           if (isTRUE(ctrl$use_posdef)) {
@@ -210,7 +221,21 @@ modified_newton <- function(
           }
           alpha <- alpha * 0.5 
         }
-        if (!ls_ok) { status <- "line_search_failed"; break }
+        if (!ls_ok) {
+          # Line search failed. Before declaring failure, re-check convergence at the
+          # current point with the SAME criteria as 4.3 (via check_convergence), so any
+          # user-selected stopping rule is honored here too. x, f, and g are unchanged
+          # in this branch, so the values passed match those tested at the top of this
+          # iteration; only the positive-definiteness handling differs (a failed line
+          # search at a non-PD point is treated as a genuine failure, not convergence).
+          res_conv <- check_convergence(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, it)
+          if (res_conv) {
+            if (isTRUE(ctrl$use_posdef)) {
+              if (is_pd) { converged <- TRUE; status <- "converged"; break }
+            } else { converged <- TRUE; status <- "converged"; break }
+          }
+          status <- "line_search_failed"; break
+        }
         
         g <- grad_func(x)
         

@@ -101,6 +101,30 @@ newton_raphson <- function(
   # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
   
+  # Shared convergence test for the main loop (4.4) and the line-search-failure branch.
+  # Returns only whether the enabled stopping criteria are met; posdef checks and status
+  # assignment stay at the call sites. All criteria are read from ctrl; the per-criterion
+  # guards reproduce the original inline 4.4 conditions exactly.
+  check_convergence <- function(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, cur_it) {
+    res_conv <- TRUE
+    if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+    if (ctrl$use_abs_f) res_conv <- res_conv && (!is.na(f) && abs(f) <= ctrl$tol_abs_f)
+    if (ctrl$use_rel_f && cur_it > 1L && !is.na(f_old)) {
+      res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+    }
+    if (ctrl$use_abs_x) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+    if (ctrl$use_rel_x && cur_it > 1L) {
+      res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old))) <= ctrl$tol_rel_x)
+    }
+    if (isTRUE(ctrl$use_pred_f)) {
+      res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
+    }
+    if (isTRUE(ctrl$use_pred_f_avg)) {
+      res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
+    }
+    res_conv
+  }
+  
   grad_func <- if (!is.null(gradient)) {
     function(z) as.numeric(gradient(z, ...))
   } else if (ctrl$diff_method == "richardson") {
@@ -152,23 +176,8 @@ newton_raphson <- function(
           pred_dec <- as.numeric(-(gTp + 0.5 * sum(step * (H %*% step)))); pred_dec_avg <- pred_dec / n
         }
         
-        # 4.4) Convergence Verification (Accessing flags via ctrl$)
-        res_conv <- TRUE
-        if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
-        if (ctrl$use_abs_f) res_conv <- res_conv && (!is.na(f) && abs(f) <= ctrl$tol_abs_f)
-        if (ctrl$use_rel_f && it > 1L && !is.na(f_old)) {
-          res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
-        }
-        if (ctrl$use_abs_x) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
-        if (ctrl$use_rel_x && it > 1L) {
-          res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old))) <= ctrl$tol_rel_x)
-        }
-        if (isTRUE(ctrl$use_pred_f)) {
-          res_conv <- res_conv && (is.finite(pred_dec) && pred_dec <= ctrl$tol_pred_f)
-        }
-        if (isTRUE(ctrl$use_pred_f_avg)) {
-          res_conv <- res_conv && (is.finite(pred_dec_avg) && pred_dec_avg <= ctrl$tol_pred_f_avg)
-        }
+        # 4.4) Convergence Verification (shared check_convergence, all ctrl flags honored)
+        res_conv <- check_convergence(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, it)
         
         if (res_conv) {
           if (isTRUE(ctrl$use_posdef)) {
@@ -188,7 +197,18 @@ newton_raphson <- function(
           alpha <- alpha * 0.5
         }
         
-        if (!ls_ok) { status <- "line_search_failed"; break }
+        if (!ls_ok) {
+          # Re-check convergence at the current point before failing: a line search can
+          # fail simply because g ~ 0 (nothing left to decrease). Same criteria as 4.4,
+          # but a non-PD point here is a genuine failure rather than convergence.
+          res_conv <- check_convergence(g_inf, f, f_old, x, x_old, pred_dec, pred_dec_avg, it)
+          if (res_conv) {
+            if (isTRUE(ctrl$use_posdef)) {
+              if (is_pd) { converged <- TRUE; status <- "converged"; break }
+            } else { converged <- TRUE; status <- "converged"; break }
+          }
+          status <- "line_search_failed"; break
+        }
         g <- grad_func(x)
         
         # Post-line-search convergence check (handles exact solutions, e.g., quadratics)
