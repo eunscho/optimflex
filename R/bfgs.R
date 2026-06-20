@@ -116,6 +116,21 @@ bfgs <- function(
   # ---------- 2. Internal Helpers ----------
   eval_obj <- function(z) as.numeric(objective(z, ...))[1]
   
+  # Shared convergence test for the main loop (5.2) and the line-search-failure branch.
+  # Returns whether the enabled gradient / parameter / function-value criteria are met;
+  # the predicted-decrease tests need the accepted step, so they stay in 5.6b. The PD check
+  # and status assignment stay at the call sites. Reading the flags here means changing the
+  # convergence criteria affects both call sites identically.
+  check_convergence <- function(g_inf, f, f_old, x, x_old, cur_it) {
+    res_conv <- TRUE
+    if (ctrl$use_grad) res_conv <- res_conv && (g_inf <= ctrl$tol_grad)
+    if (ctrl$use_abs_f && !is.na(f_old)) res_conv <- res_conv && (abs(f - f_old) <= ctrl$tol_abs_f)
+    if (ctrl$use_rel_f && !is.na(f_old)) res_conv <- res_conv && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
+    if (ctrl$use_abs_x && cur_it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
+    if (ctrl$use_rel_x && cur_it > 1L) res_conv <- res_conv && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+    res_conv
+  }
+
   grad_func <- if (!is.null(gradient)) {
     function(z) as.numeric(gradient(z, ...))
   } else if (ctrl$diff_method == "richardson") {
@@ -193,16 +208,11 @@ bfgs <- function(
         }
         
         # 5.2) Convergence Verification
-        # Gradient / parameter / function-value tests use the current point (before the
-        # line search), matching gauss_newton(). The predicted-decrease tests
-        # (use_pred_f / use_pred_f_avg) need the step that the line search selects, so they
-        # are evaluated after the line search (see 5.6b) and AND-combined with res_conv_pre.
-        res_conv_pre <- TRUE
-        if (ctrl$use_grad) res_conv_pre <- res_conv_pre && (g_inf <= ctrl$tol_grad)
-        if (ctrl$use_abs_f && !is.na(f_old)) res_conv_pre <- res_conv_pre && (abs(f - f_old) <= ctrl$tol_abs_f)
-        if (ctrl$use_rel_f && !is.na(f_old)) res_conv_pre <- res_conv_pre && (abs((f - f_old) / max(1, abs(f_old))) <= ctrl$tol_rel_f)
-        if (ctrl$use_abs_x && it > 1L) res_conv_pre <- res_conv_pre && (max(abs(x - x_old)) <= ctrl$tol_abs_x)
-        if (ctrl$use_rel_x && it > 1L) res_conv_pre <- res_conv_pre && (max(abs(x - x_old)) / max(1, max(abs(x_old)))) <= ctrl$tol_rel_x
+        # Gradient / parameter / function-value tests use the current point (before the line
+        # search), via the shared check_convergence so all flags are honored. The predicted-
+        # decrease tests need the step the line search selects, so they are evaluated after
+        # the line search (see 5.6b) and AND-combined with res_conv_pre.
+        res_conv_pre <- check_convergence(g_inf, f, f_old, x, x_old, it)
         
         # When neither predicted-decrease test is active, the convergence decision is
         # complete here, so finalize immediately (this also skips an unnecessary line
@@ -218,7 +228,19 @@ bfgs <- function(
         
         # 5.3) Line Search
         ls <- strong_wolfe_ls(x, f, g, p, dphi0)
-        if (!isTRUE(ls$ok)) { status <- ls$status; break }
+        if (!isTRUE(ls$ok)) {
+          # Line search found no acceptable step. Re-check convergence with the same criteria
+          # as 5.2 (via check_convergence) so user-configured stopping rules are honored: a
+          # line search can fail simply because we are at a stationary point. A non-positive-
+          # definite point here is a genuine failure rather than convergence.
+          if (check_convergence(g_inf, f, f_old, x, x_old, it)) {
+            if (isTRUE(ctrl$use_posdef)) {
+              H_eval <- tryCatch(hess_func(x), error = function(e) NULL)
+              if (is_pd_fast(H_eval)) { status <- "converged"; converged <- TRUE; break }
+            } else { status <- "converged"; converged <- TRUE; break }
+          }
+          status <- ls$status; break
+        }
         
         # 5.4) Update Parameters
         alpha_final <- ls$alpha; x_new <- ls$x; f_new <- ls$f; g_new <- ls$g
