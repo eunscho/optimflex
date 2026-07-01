@@ -25,12 +25,10 @@
 #'   \item \bold{Cauchy Point (\eqn{p_C}):} The minimizer of the quadratic model along 
 #'         the steepest descent direction.
 #'   \item \bold{Newton Point (\eqn{p_N}):} The minimizer of the quadratic model \eqn{(B^{-1}g)}.
-#'   \item \bold{Double Dogleg Point (\eqn{p_W}):} A point defined as \eqn{\eta \cdot p_N},
-#'         where the bias \eqn{\eta = (1 - \texttt{dd\_bias}) + \texttt{dd\_bias} \cdot \hat\gamma}
-#'         with \eqn{\hat\gamma = (g^T g)^2 / ((g^T B g)(g^T B^{-1} g)) \in (0,1]}. At the
-#'         default \code{dd_bias = 0.8} this is the standard \eqn{0.2 + 0.8\,\hat\gamma}
-#'         choice of Dennis and Schnabel, which keeps the step length monotonically
-#'         increasing along the Cauchy -> bias -> Newton path.
+#'   \item \bold{Double Dogleg Point (\eqn{p_W}):} A point defined as \eqn{\gamma \cdot p_N}, 
+#'         where \eqn{\gamma} is a scaling factor (bias) that ensures the path stays 
+#'         closer to the Newton direction while maintaining monotonic descent in 
+#'         the model.
 #' }
 #' This modification allows the algorithm to perform more like a Newton method 
 #' earlier in the optimization process compared to the standard Dogleg.
@@ -271,9 +269,8 @@ double_dogleg <- function(
     # Activated only when both residual and jac are supplied. The Gauss-Newton point is the
     # least-squares solution of min || -r - J p || obtained from J (2 J'J is not assembled
     # for the solve); g = 2 J'r, the curvature is 2 J'J, and the double-dogleg bias point
-    # pW = eta * pN uses eta = (1 - dd_bias) + dd_bias * gamma_hat with
-    # gamma_hat = ||g||^4 / ((g' B g)(g' B^{-1} g)) and g' B^{-1} g = -g' pN. The path is
-    # restricted to the trust region of radius delta.
+    # pW = gamma * pN uses gamma = dd_bias * ||g||^4 / ((g' B g)(g' B^{-1} g)) with
+    # g' B^{-1} g = -g' pN. The path is restricted to the trust region of radius delta.
     r <- as.numeric(residual(x, ...))
     J <- matrix(as.numeric(jac(x, ...)), nrow = length(r))
     g <- 2 * as.numeric(crossprod(J, r))
@@ -292,10 +289,9 @@ double_dogleg <- function(
         pC <- -alpha_c * g
         
         ghinvg <- sum(g * (-pN))                                   # g' B^{-1} g = -g' pN
-        gamma_hat <- if (ghinvg > 1e-15 && gBg > 1e-15) gnorm^4 / (gBg * ghinvg) else 1.0
-        gamma_hat <- min(1.0, max(0.0, gamma_hat))                 # in (0,1] by Cauchy-Schwarz
-        eta <- (1 - ctrl$dd_bias) + ctrl$dd_bias * gamma_hat       # = 0.2 + 0.8*gamma_hat at default dd_bias
-        pW <- eta * pN
+        gamma <- if (ghinvg > 1e-15 && gBg > 1e-15) ctrl$dd_bias * (gnorm^4 / (gBg * ghinvg)) else 1.0
+        gamma <- max(alpha_c, min(1.0, gamma))
+        pW <- gamma * pN
         
         nPN <- sqrt(sum(pN^2)); nPC <- sqrt(sum(pC^2)); nPW <- sqrt(sum(pW^2))
         if (nPN <= delta) {
@@ -386,11 +382,10 @@ double_dogleg <- function(
           alpha_c <- if (gBg > 1e-15) (gnorm^2) / gBg else delta / max(gnorm, 1e-12)
           pC_f <- -alpha_c * g_f
           
-          ghinvg <- sum(g_f * (-pN_f))                             # g' B_f^{-1} g = -g' pN
-          gamma_hat <- if (ghinvg > 1e-15 && gBg > 1e-15) gnorm^4 / (gBg * ghinvg) else 1.0
-          gamma_hat <- min(1.0, max(0.0, gamma_hat))               # in (0,1] by Cauchy-Schwarz
-          eta <- (1 - ctrl$dd_bias) + ctrl$dd_bias * gamma_hat     # = 0.2 + 0.8*gamma_hat at default dd_bias
-          pW_f <- eta * pN_f
+          ghinvg <- sum(g_f * (-pN_f))
+          gamma <- if (ghinvg > 1e-15 && gBg > 1e-15) ctrl$dd_bias * (gnorm^4 / (gBg * ghinvg)) else 1.0
+          gamma <- max(alpha_c, min(1.0, gamma))
+          pW_f <- gamma * pN_f
           
           nPN <- sqrt(sum(pN_f^2)); nPC <- sqrt(sum(pC_f^2)); nPW <- sqrt(sum(pW_f^2))
           
